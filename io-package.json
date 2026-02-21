@@ -179,6 +179,8 @@
     "dns01Ousername": "",
     "dns01OverifyPropagation": false,
     "dns01PpropagationDelay": 120000,
+    "dns01OcustomerNumber": "",
+    "dns01OapiPassword": "",
     "collections": [
       {
         "id": "exampleDomain",
@@ -187,6 +189,9 @@
       }
     ]
   },
+  "encryptedNative": [
+    "dns01OapiPassword"
+  ],
   "objects": [],
   "instanceObjects": [
     {
