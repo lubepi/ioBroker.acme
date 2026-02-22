@@ -1,7 +1,0 @@
-{
-    "name": "acme-dns-01-netcup",
-    "version": "1.0.0",
-    "description": "ACME DNS-01 challenge handler for Netcup CCP DNS API",
-    "main": "index.js",
-    "license": "MIT"
-}

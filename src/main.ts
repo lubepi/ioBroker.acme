@@ -186,12 +186,18 @@ class AcmeAdapter extends utils.Adapter {
             // Do this inside try... catch as the module is configurable
             let thisChallenge: ChallengeHandler | undefined;
             try {
-                // Dynamic import - module name comes from config
-                const dns01Module = await import(this.config.dns01Module);
-                if (dns01Module.default) {
-                    thisChallenge = dns01Module.default.create(dns01Options);
+                // Netcup is bundled locally; all other modules are npm packages
+                if (this.config.dns01Module === 'acme-dns-01-netcup') {
+                    const netcupModule = await import('./lib/acme-dns-01-netcup.js');
+                    thisChallenge = netcupModule.create(dns01Options as any);
                 } else {
-                    thisChallenge = dns01Module.create(dns01Options);
+                    // Dynamic import - module name comes from config
+                    const dns01Module = await import(this.config.dns01Module);
+                    if (dns01Module.default) {
+                        thisChallenge = dns01Module.default.create(dns01Options);
+                    } else {
+                        thisChallenge = dns01Module.create(dns01Options);
+                    }
                 }
             } catch (err) {
                 this.log.error(`Failed to load dns-01 challenge module: ${err}`);
