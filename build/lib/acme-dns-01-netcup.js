@@ -15,7 +15,7 @@ exports.create = create;
  *   For ccSLDs like .co.uk the public-suffix list would be needed.
  *   All common Netcup domains use single-label TLDs, so this is sufficient.
  */
-const API_ENDPOINT = 'https://ccp.netcup.net/run/webservice/servers/endpoint.php';
+const API_ENDPOINT = 'https://ccp.netcup.net/run/webservice/servers/endpoint.php?JSON';
 /**
  * Send a JSON request to the Netcup CCP API.
  */
@@ -29,7 +29,14 @@ async function apiCall(action, param) {
     if (!response.ok) {
         throw new Error(`Netcup HTTP error: ${response.status} ${response.statusText}`);
     }
-    const json = (await response.json());
+    const rawText = await response.text();
+    let json;
+    try {
+        json = JSON.parse(rawText);
+    }
+    catch {
+        throw new Error(`Netcup API returned non-JSON response: ${rawText.slice(0, 200)}`);
+    }
     // Netcup uses statuscode 2000 for success
     if (json.statuscode !== 2000) {
         throw new Error(`Netcup API error [${json.statuscode}]: ${json.longmessage ?? json.shortmessage ?? 'unknown error'}`);

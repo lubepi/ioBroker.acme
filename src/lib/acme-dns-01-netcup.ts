@@ -15,7 +15,7 @@
  *   All common Netcup domains use single-label TLDs, so this is sufficient.
  */
 
-const API_ENDPOINT = 'https://ccp.netcup.net/run/webservice/servers/endpoint.php';
+const API_ENDPOINT = 'https://ccp.netcup.net/run/webservice/servers/endpoint.php?JSON';
 
 interface NetcupOptions {
     customerNumber: string | number;
@@ -55,7 +55,13 @@ async function apiCall(action: string, param: Record<string, unknown>): Promise<
         throw new Error(`Netcup HTTP error: ${response.status} ${response.statusText}`);
     }
 
-    const json = (await response.json()) as { statuscode: number; longmessage?: string; shortmessage?: string; responsedata: any };
+    const rawText = await response.text();
+    let json: { statuscode: number; longmessage?: string; shortmessage?: string; responsedata: any };
+    try {
+        json = JSON.parse(rawText);
+    } catch {
+        throw new Error(`Netcup API returned non-JSON response: ${rawText.slice(0, 200)}`);
+    }
 
     // Netcup uses statuscode 2000 for success
     if (json.statuscode !== 2000) {
