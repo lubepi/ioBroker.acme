@@ -41,8 +41,9 @@ interface ChallengeData {
 
 /**
  * Send a JSON request to the Netcup CCP API.
+ * @param throwOnError - if false, returns the raw response even on non-2xxx status (used by get/remove)
  */
-async function apiCall(action: string, param: Record<string, unknown>): Promise<any> {
+async function apiCall(action: string, param: Record<string, unknown>, throwOnError = true): Promise<any> {
     const body = JSON.stringify({ action, param });
 
     const response = await fetch(API_ENDPOINT, {
@@ -63,14 +64,16 @@ async function apiCall(action: string, param: Record<string, unknown>): Promise<
         throw new Error(`Netcup API returned non-JSON response: ${rawText.slice(0, 200)}`);
     }
 
-    // Netcup uses statuscode 2000 for success
-    if (json.statuscode !== 2000) {
+    // Netcup uses 2xxx for success (2000 = OK, 2011 = object created/updated, etc.)
+    const isSuccess = json.statuscode >= 2000 && json.statuscode < 3000;
+
+    if (!isSuccess && throwOnError) {
         throw new Error(
             `Netcup API error [${json.statuscode}]: ${json.longmessage ?? json.shortmessage ?? 'unknown error'}`,
         );
     }
 
-    return json.responsedata;
+    return isSuccess ? json.responsedata : null;
 }
 
 /**
@@ -101,14 +104,45 @@ async function logout(customerNumber: string | number, apiKey: string, apisessio
 }
 
 /**
- * Split a full DNS name like "_acme-challenge.sub.example.com" into
- * { rootDomain: 'example.com', hostname: '_acme-challenge.sub' }.
+ * Find the correct DNS zone and relative hostname for a given full DNS name.
+ * Uses infoDnsZone to probe from most-specific to least-specific, exactly like
+ * the official froonix/acme-dns-nc PHP reference implementation.
+ *
+ * Example: "_acme-challenge.sub.example.de"
+ *   → tries "sub.example.de" → not found
+ *   → tries "example.de"     → found  ✓
+ *   → rootDomain = "example.de", hostname = "_acme-challenge.sub"
  */
-function splitDomain(fullDomain: string): { rootDomain: string; hostname: string } {
+async function findZone(
+    fullDomain: string,
+    customerNumber: string | number,
+    apiKey: string,
+    apisessionid: string,
+): Promise<{ rootDomain: string; hostname: string }> {
     const parts = fullDomain.split('.');
-    if (parts.length < 2) {
-        throw new Error(`Cannot split domain: ${fullDomain}`);
+
+    // Walk from most-specific (all parts minus the first) toward the apex
+    for (let i = 1; i < parts.length - 1; i++) {
+        const candidate = parts.slice(i).join('.');
+        const result = await apiCall(
+            'infoDnsZone',
+            {
+                customernumber: String(customerNumber),
+                apikey: apiKey,
+                apisessionid,
+                domainname: candidate,
+            },
+            false, // don't throw – 5028/5029 means zone not found
+        );
+
+        if (result !== null) {
+            // Zone found – everything before index i is the relative hostname
+            const hostname = parts.slice(0, i).join('.') || '@';
+            return { rootDomain: candidate, hostname };
+        }
     }
+
+    // Fall back to last-two-labels heuristic (should rarely be needed)
     const rootDomain = parts.slice(-2).join('.');
     const hostname = parts.slice(0, -2).join('.') || '@';
     return { rootDomain, hostname };
@@ -141,10 +175,10 @@ export function create(options: NetcupOptions): {
 
         async set(data: ChallengeData): Promise<null> {
             const { dnsHost, dnsAuthorization } = data.challenge;
-            const { rootDomain, hostname } = splitDomain(dnsHost);
 
             const apisessionid = await login(customerNumber, apiKey, apiPassword);
             try {
+                const { rootDomain, hostname } = await findZone(dnsHost, customerNumber, apiKey, apisessionid);
                 await apiCall('updateDnsRecords', {
                     customernumber: String(customerNumber),
                     apikey: apiKey,
@@ -169,22 +203,30 @@ export function create(options: NetcupOptions): {
 
         async get(data: ChallengeData): Promise<{ dnsAuthorization: string } | null> {
             const { dnsHost, dnsAuthorization } = data.challenge;
-            const { rootDomain, hostname } = splitDomain(dnsHost);
 
             const apisessionid = await login(customerNumber, apiKey, apiPassword);
             try {
-                const recordsData = await apiCall('infoDnsRecords', {
-                    customernumber: String(customerNumber),
-                    apikey: apiKey,
-                    apisessionid,
-                    domainname: rootDomain,
-                });
+                const { rootDomain, hostname } = await findZone(dnsHost, customerNumber, apiKey, apisessionid);
+                // Use throwOnError=false: error 5029 (no records) must return null, not throw
+                const recordsData = await apiCall(
+                    'infoDnsRecords',
+                    {
+                        customernumber: String(customerNumber),
+                        apikey: apiKey,
+                        apisessionid,
+                        domainname: rootDomain,
+                    },
+                    false,
+                );
 
                 const records: DnsRecord[] = recordsData?.dnsrecords ?? [];
                 const found = records.find(
                     r => r.type === 'TXT' && r.hostname === hostname && r.destination === dnsAuthorization,
                 );
                 return found ? { dnsAuthorization: found.destination } : null;
+            } catch {
+                // Any unexpected error: treat as "record not visible yet"
+                return null;
             } finally {
                 await logout(customerNumber, apiKey, apisessionid);
             }
@@ -192,16 +234,21 @@ export function create(options: NetcupOptions): {
 
         async remove(data: ChallengeData): Promise<null> {
             const { dnsHost, dnsAuthorization } = data.challenge;
-            const { rootDomain, hostname } = splitDomain(dnsHost);
 
             const apisessionid = await login(customerNumber, apiKey, apiPassword);
             try {
-                const recordsData = await apiCall('infoDnsRecords', {
-                    customernumber: String(customerNumber),
-                    apikey: apiKey,
-                    apisessionid,
-                    domainname: rootDomain,
-                });
+                const { rootDomain, hostname } = await findZone(dnsHost, customerNumber, apiKey, apisessionid);
+                // Use throwOnError=false: zone may have no records at all
+                const recordsData = await apiCall(
+                    'infoDnsRecords',
+                    {
+                        customernumber: String(customerNumber),
+                        apikey: apiKey,
+                        apisessionid,
+                        domainname: rootDomain,
+                    },
+                    false,
+                );
 
                 const records: DnsRecord[] = recordsData?.dnsrecords ?? [];
                 const toDelete = records
