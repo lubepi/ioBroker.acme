@@ -276,7 +276,7 @@
           "md": 6,
           "lg": 4,
           "xl": 4,
-          "hidden": "!data.dns01Active || data.dns01Module != 'acme-dns-01-namecheap'"
+          "hidden": "!data.dns01Active || !['acme-dns-01-namecheap','acme-dns-01-netcup'].includes(data.dns01Module)"
         },
         "dns01OapiPassword": {
           "newLine": true,

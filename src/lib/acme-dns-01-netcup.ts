@@ -123,6 +123,7 @@ export function create(options: NetcupOptions): {
     get: (data: ChallengeData) => Promise<{ dnsAuthorization: string } | null>;
     remove: (data: ChallengeData) => Promise<null>;
     shutdown: () => void;
+    propagationDelay: number;
 } {
     const { customerNumber, apiKey, apiPassword } = options;
 
@@ -131,6 +132,9 @@ export function create(options: NetcupOptions): {
     }
 
     return {
+        // Default propagation delay of 30s; can be overridden via dns01PpropagationDelay in adapter config.
+        propagationDelay: 30000,
+
         async init(): Promise<null> {
             return null;
         },

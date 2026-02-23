@@ -91,6 +91,8 @@ function create(options) {
         throw new Error('acme-dns-01-netcup: customerNumber, apiKey and apiPassword are all required');
     }
     return {
+        // Default propagation delay of 30s; can be overridden via dns01PpropagationDelay in adapter config.
+        propagationDelay: 30000,
         async init() {
             return null;
         },
