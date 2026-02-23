@@ -218,7 +218,7 @@ class AcmeAdapter extends utils.Adapter {
             const accountObject = await this.getObjectAsync(accountObjectId);
             if (accountObject) {
                 this.log.debug(`Loaded existing ACME account: ${JSON.stringify(accountObject)}`);
-                if (accountObject.native?.full?.contact[0] !== `mailto:${this.config.maintainerEmail}`) {
+                if (accountObject.native?.full?.contact?.[0] !== `mailto:${this.config.maintainerEmail}`) {
                     this.log.warn('Saved account does not match maintainer email, will recreate.');
                 }
                 else {
