@@ -11,7 +11,7 @@ import Keypairs from '@root/keypairs';
 import CSR from '@root/csr';
 import PEM from '@root/pem';
 import x509 from 'x509.js';
-import { setServers as dnsSetServers } from 'node:dns';
+import { Resolver } from 'node:dns/promises';
 
 import type { AdapterOptions } from '@iobroker/adapter-core';
 
@@ -85,10 +85,6 @@ class AcmeAdapter extends utils.Adapter {
      * Is called when databases are connected and adapter received configuration.
      */
     async onReady(): Promise<void> {
-        // Override system DNS resolver globally so that acme.js's internal
-        // dns.resolveTxt() checks also use public resolvers instead of the
-        // potentially stale local/router resolver cache.
-        dnsSetServers(['1.1.1.1', '8.8.8.8']);
         this.log.debug(`config: ${JSON.stringify(this.config)}`);
 
         this.certManager = new CertificateManager({ adapter: this });
@@ -248,6 +244,20 @@ class AcmeAdapter extends utils.Adapter {
                 debug: true,
             });
             await this.acme!.init(directoryUrl);
+
+            // Override acme.js's internal DNS-01 Pre-Flight check to use public resolvers.
+            // The default uses promisify(require('dns').resolveTxt) which is bound at
+            // module load time and ignores dns.setServers() calls made later.
+            // By overriding acme.dns01 here, we force 1.1.1.1/8.8.8.8 for the dry-run check.
+            const publicDnsResolver = new Resolver();
+            publicDnsResolver.setServers(['1.1.1.1', '8.8.8.8']);
+            (this.acme as any).dns01 = async (ch: { dnsHost: string }) => {
+                const records = await publicDnsResolver.resolveTxt(ch.dnsHost);
+                return {
+                    answer: records.map((rr: string[]) => ({ data: rr })),
+                };
+            };
+            this.log.debug('acme.dns01 overridden to use public DNS resolvers (1.1.1.1, 8.8.8.8)');
 
             // Try and load a saved object
             const accountObject = await this.getObjectAsync(accountObjectId);
