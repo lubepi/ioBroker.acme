@@ -1,0 +1,1 @@
+import{C as _}from"./ConfigCustomAcmeSet__mf_v__runtimeInit__mf_v__-ZTRlPSE_.js";const{initPromise:t}=_,o=t.then(e=>e.loadShare("@mui/material",{customShareInfo:{shareConfig:{singleton:!0,strictVersion:!1,requiredVersion:"*"}}})),r=await o.then(e=>e());var a=r;export{a as C};
