@@ -266,7 +266,7 @@ class AcmeAdapter extends utils.Adapter {
                 // Two consecutive updates (dry-run remove + real set) can take ~10-20 min.
                 const maxAttempts = 120; // 120 × 10 s = 20 min
                 const retryDelayMs = 10000;
-                this.log.warn(`acme.dns01: polling authoritative NS for ${ch.dnsHost} ` +
+                this.log.info(`acme.dns01: polling authoritative NS for ${ch.dnsHost} ` +
                     `(every ${retryDelayMs / 1000}s, max ${maxAttempts} attempts = ${maxAttempts * retryDelayMs / 60000} min)...`);
                 // The expected value for this specific challenge attempt
                 const expectedValue = ch.dnsAuthorization;
@@ -276,21 +276,21 @@ class AcmeAdapter extends utils.Adapter {
                     try {
                         const records = await resolver.resolveTxt(ch.dnsHost);
                         // Must find the specific expected value — not just any stale TXT record
-                        const hasExpected = records.flat().includes(expectedValue);
-                        if (hasExpected) {
-                            this.log.warn(`acme.dns01: correct TXT value found on authoritative NS after attempt ${attempt}/${maxAttempts}`);
+                        if (records.flat().includes(expectedValue)) {
+                            this.log.info(`acme.dns01: correct TXT value found on authoritative NS after attempt ${attempt}/${maxAttempts}`);
                             foundRecords = records;
                             break;
                         }
-                        else if (records.length > 0) {
-                            this.log.debug(`acme.dns01: attempt ${attempt}/${maxAttempts}: found ${records.length} TXT record(s) but none match expected value (stale records still present), waiting ${retryDelayMs / 1000}s...`);
-                        }
+                        this.log.debug(`acme.dns01: attempt ${attempt}/${maxAttempts}: ` +
+                            (records.length > 0
+                                ? `found ${records.length} stale TXT record(s) but not the expected value`
+                                : 'no TXT records yet') +
+                            `, retrying in ${retryDelayMs / 1000}s...`);
                     }
-                    catch { /* ENOTFOUND = not yet visible, keep polling */ }
-                    if (foundRecords.length === 0) {
-                        this.log.debug(`acme.dns01: attempt ${attempt}/${maxAttempts}: not yet visible, waiting ${retryDelayMs / 1000}s...`);
-                        await new Promise(r => setTimeout(r, retryDelayMs));
+                    catch {
+                        this.log.debug(`acme.dns01: attempt ${attempt}/${maxAttempts}: NXDOMAIN — not yet visible, retrying in ${retryDelayMs / 1000}s...`);
                     }
+                    await new Promise(r => setTimeout(r, retryDelayMs));
                 }
                 if (foundRecords.length === 0) {
                     throw new Error(`acme.dns01: TXT record not visible on authoritative NS after ${maxAttempts} attempts`);
@@ -301,25 +301,27 @@ class AcmeAdapter extends utils.Adapter {
                 // Only submitting the challenge once public resolvers see the record too
                 // prevents LE from instantly failing the validation with a cached miss.
                 const maxPublicAttempts = 60; // 60 × 10 s = 10 min extra
-                this.log.warn(`acme.dns01: record on authoritative NS — now waiting for public resolvers (1.1.1.1/8.8.8.8) to see it...`);
+                this.log.info(`acme.dns01: TXT confirmed on authoritative NS — now waiting for public resolvers (1.1.1.1/8.8.8.8) to see it...`);
                 for (let attempt = 1; attempt <= maxPublicAttempts; attempt++) {
                     try {
                         const records = await publicResolver.resolveTxt(ch.dnsHost);
-                        const hasExpected = records.flat().includes(expectedValue);
-                        if (hasExpected) {
-                            this.log.warn(`acme.dns01: correct TXT value confirmed on public resolver after ${attempt}/${maxPublicAttempts} extra attempts — submitting challenge to LE`);
+                        if (records.flat().includes(expectedValue)) {
+                            this.log.info(`acme.dns01: correct TXT value confirmed on public resolver after ${attempt}/${maxPublicAttempts} — submitting challenge to LE`);
                             return { answer: records.map((rr) => ({ data: rr })) };
                         }
-                        else if (records.length > 0) {
-                            this.log.debug(`acme.dns01: public resolver attempt ${attempt}/${maxPublicAttempts}: found TXT records but not the expected value yet, waiting ${retryDelayMs / 1000}s...`);
-                        }
+                        this.log.debug(`acme.dns01: public resolver attempt ${attempt}/${maxPublicAttempts}: ` +
+                            (records.length > 0
+                                ? 'found stale records but not the expected value'
+                                : 'no records yet') +
+                            `, retrying in ${retryDelayMs / 1000}s...`);
                     }
-                    catch { /* ENOTFOUND = not yet propagated to public resolver */ }
-                    this.log.debug(`acme.dns01: public resolver attempt ${attempt}/${maxPublicAttempts}: not yet visible, waiting ${retryDelayMs / 1000}s...`);
+                    catch {
+                        this.log.debug(`acme.dns01: public resolver attempt ${attempt}/${maxPublicAttempts}: NXDOMAIN, retrying in ${retryDelayMs / 1000}s...`);
+                    }
                     await new Promise(r => setTimeout(r, retryDelayMs));
                 }
                 // Public resolver didn't pick it up — submit anyway with authoritative NS result
-                this.log.warn(`acme.dns01: public resolver timeout — submitting challenge to LE with authoritative NS result`);
+                this.log.warn(`acme.dns01: public resolver timeout — submitting with authoritative NS result (may still succeed)`);
                 return { answer: foundRecords.map((rr) => ({ data: rr })) };
             };
             this.log.debug('acme.dns01 overridden: polls authoritative NS until record is visible, then immediately submits to LE');
@@ -330,8 +332,11 @@ class AcmeAdapter extends utils.Adapter {
                 if (accountObject.native?.maintainerEmail !== this.config.maintainerEmail) {
                     this.log.warn('Saved account does not match maintainer email, will recreate.');
                 }
+                else if (accountObject.native?.useStaging === undefined) {
+                    this.log.warn('Saved account is missing staging/production flag (old format), will recreate.');
+                }
                 else if (accountObject.native?.useStaging !== this.config.useStaging) {
-                    this.log.warn(`Saved account was created for ${accountObject.native?.useStaging ? 'staging' : 'production'} LE, but current config uses ${this.config.useStaging ? 'staging' : 'production'} — will recreate.`);
+                    this.log.warn(`Saved account was created for ${accountObject.native.useStaging ? 'staging' : 'production'} LE, but current config uses ${this.config.useStaging ? 'staging' : 'production'} — will recreate.`);
                 }
                 else {
                     this.account = accountObject.native;
