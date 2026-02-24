@@ -27,14 +27,19 @@ function patchCustomComponents() {
     const file = `${__dirname}/admin/custom/customComponents.js`;
     let content = fs.readFileSync(file, 'utf8');
 
-    // 1. Replace "import.meta.url" with a runtime-safe equivalent.
-    //    document.currentScript.src gives the URL of the currently executing script.
-    const importMetaReplacement =
-        '(typeof document!=="undefined"&&document.currentScript&&document.currentScript.src' +
-        '||new URL("./customComponents.js",typeof location!=="undefined"?location.href:"http://localhost/").href)';
-    content = content.replace(/import\.meta\.url/g, importMetaReplacement);
+    // 1. Capture the script's own URL at top-level execution time (before any async code).
+    //    document.currentScript is only valid synchronously during script execution,
+    //    so we store it in a variable that all lazy loaders can close over.
+    const urlCapture =
+        'var __mf_scriptUrl=' +
+        '(typeof document!=="undefined"&&document.currentScript&&document.currentScript.src)' +
+        '||(typeof __filename!=="undefined"?__filename:"");';
+    content = urlCapture + '\n' + content;
 
-    // 2. Replace ES-module export with a window global assignment so the file
+    // 2. Replace all import.meta.url references with the captured variable.
+    content = content.replace(/import\.meta\.url/g, '__mf_scriptUrl');
+
+    // 3. Replace ES-module export with a window global assignment so the file
     //    works when loaded as a classic <script> tag.
     content = content.replace(
         /export\{(\w+) as get,(\w+) as init\};?\s*$/,
