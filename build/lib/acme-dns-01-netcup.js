@@ -161,36 +161,42 @@ function create(options) {
             finally {
                 await logout(customerNumber, apiKey, apisessionid);
             }
-            return null;
-        },
-        async get(data) {
-            const { dnsHost, dnsAuthorization } = data.challenge;
-            log.warn(`[acme-dns-01-netcup] get: polling DNS for dnsHost="${dnsHost}"`);
-            // Poll actual public DNS resolution – only return success once the
-            // TXT record is actually resolvable. This handles Netcup's propagation
-            // delay (records start with state="unknown" after creation).
+            // Poll public DNS until the TXT record is resolvable.
+            // acme.js does its own dns.resolveTxt() check immediately after set() returns,
+            // so we must not return until the record is actually visible in DNS.
             const maxAttempts = 30;
             const retryDelayMs = 30000; // 30 s per attempt → up to 15 min total
+            log.warn(`[acme-dns-01-netcup] set: waiting for DNS propagation (polling every ${retryDelayMs / 1000}s, max ${maxAttempts} attempts)...`);
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
                 try {
                     const results = await node_dns_1.promises.resolveTxt(dnsHost);
-                    const flat = results.flat();
-                    if (flat.includes(dnsAuthorization)) {
-                        log.warn(`[acme-dns-01-netcup] get: DNS record confirmed after attempt ${attempt}/${maxAttempts}`);
-                        return { dnsAuthorization };
+                    if (results.flat().includes(dnsAuthorization)) {
+                        log.warn(`[acme-dns-01-netcup] set: DNS record confirmed after attempt ${attempt}/${maxAttempts}`);
+                        return null;
                     }
-                    log.warn(`[acme-dns-01-netcup] get: TXT record not yet present (attempt ${attempt}/${maxAttempts}), waiting ${retryDelayMs / 1000}s...`);
+                    log.warn(`[acme-dns-01-netcup] set: TXT not yet visible (attempt ${attempt}/${maxAttempts}), waiting...`);
                 }
                 catch (err) {
-                    // ENOTFOUND / ENODATA = record not yet propagated
-                    log.warn(`[acme-dns-01-netcup] get: DNS lookup failed (attempt ${attempt}/${maxAttempts}): ${err.code ?? err.message} – waiting ${retryDelayMs / 1000}s...`);
+                    log.warn(`[acme-dns-01-netcup] set: DNS lookup failed (attempt ${attempt}/${maxAttempts}): ${err.code ?? err.message}, waiting...`);
                 }
-                if (attempt < maxAttempts) {
-                    await new Promise(resolve => setTimeout(resolve, retryDelayMs));
-                }
+                await new Promise(resolve => setTimeout(resolve, retryDelayMs));
             }
-            log.error(`[acme-dns-01-netcup] get: DNS record "${dnsHost}" not found after ${maxAttempts} attempts (${(maxAttempts * retryDelayMs) / 60000} min total)`);
-            return null;
+            throw new Error(`[acme-dns-01-netcup] DNS record "${dnsHost}" not visible after ${maxAttempts} attempts`);
+        },
+        async get(data) {
+            const { dnsHost, dnsAuthorization } = data.challenge;
+            log.warn(`[acme-dns-01-netcup] get: checking dnsHost="${dnsHost}"`);
+            // set() already waited for DNS propagation, so this is just a quick confirmation.
+            try {
+                const results = await node_dns_1.promises.resolveTxt(dnsHost);
+                const found = results.flat().includes(dnsAuthorization);
+                log.warn(`[acme-dns-01-netcup] get: found=${found}`);
+                return found ? { dnsAuthorization } : null;
+            }
+            catch (err) {
+                log.warn(`[acme-dns-01-netcup] get: DNS lookup failed: ${err.code ?? err.message}`);
+                return null;
+            }
         },
         async remove(data) {
             const { dnsHost, dnsAuthorization } = data.challenge;
