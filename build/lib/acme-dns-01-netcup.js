@@ -16,6 +16,11 @@ exports.create = create;
  *   All common Netcup domains use single-label TLDs, so this is sufficient.
  */
 const API_ENDPOINT = 'https://ccp.netcup.net/run/webservice/servers/endpoint.php?JSON';
+const noopLogger = {
+    warn: (msg) => console.warn(msg),
+    error: (msg) => console.error(msg),
+    debug: (msg) => console.log(msg),
+};
 /**
  * Send a JSON request to the Netcup CCP API.
  * @param throwOnError - if false, returns the raw response even on non-2xxx status (used by get/remove)
@@ -81,7 +86,7 @@ async function logout(customerNumber, apiKey, apisessionid) {
  *   → tries "example.de"     → found  ✓
  *   → rootDomain = "example.de", hostname = "_acme-challenge.sub"
  */
-async function findZone(fullDomain, customerNumber, apiKey, apisessionid) {
+async function findZone(fullDomain, customerNumber, apiKey, apisessionid, log) {
     const parts = fullDomain.split('.');
     // Walk from most-specific (all parts minus the first) toward the apex
     for (let i = 1; i < parts.length - 1; i++) {
@@ -96,14 +101,14 @@ async function findZone(fullDomain, customerNumber, apiKey, apisessionid) {
         // An empty {} response (sometimes returned by Netcup for subdomains) must NOT be accepted.
         if (result !== null && typeof result === 'object' && result.name) {
             const hostname = parts.slice(0, i).join('.') || '@';
-            console.warn(`[acme-dns-01-netcup] findZone: "${fullDomain}" → zone="${candidate}", hostname="${hostname}"`);
+            log.warn(`[acme-dns-01-netcup] findZone: "${fullDomain}" → zone="${candidate}", hostname="${hostname}"`);
             return { rootDomain: candidate, hostname };
         }
     }
     // Fall back to last-two-labels heuristic
     const rootDomain = parts.slice(-2).join('.');
     const hostname = parts.slice(0, -2).join('.') || '@';
-    console.warn(`[acme-dns-01-netcup] findZone: no zone found via API for "${fullDomain}", using fallback zone="${rootDomain}", hostname="${hostname}"`);
+    log.warn(`[acme-dns-01-netcup] findZone: no zone found via API for "${fullDomain}", using fallback zone="${rootDomain}", hostname="${hostname}"`);
     return { rootDomain, hostname };
 }
 /**
@@ -111,9 +116,11 @@ async function findZone(fullDomain, customerNumber, apiKey, apisessionid) {
  */
 function create(options) {
     const { customerNumber, apiKey, apiPassword } = options;
+    const log = options.log ?? noopLogger;
     if (!customerNumber || !apiKey || !apiPassword) {
         throw new Error('acme-dns-01-netcup: customerNumber, apiKey and apiPassword are all required');
     }
+    log.warn(`[acme-dns-01-netcup] create() called, customerNumber="${customerNumber}"`);
     return {
         // Default propagation delay of 30s; can be overridden via dns01PpropagationDelay in adapter config.
         propagationDelay: 30000,
@@ -122,11 +129,18 @@ function create(options) {
         },
         async set(data) {
             const { dnsHost, dnsAuthorization } = data.challenge;
-            console.warn(`[acme-dns-01-netcup] set called, dnsHost="${dnsHost}" value="${dnsAuthorization}"`);
-            const apisessionid = await login(customerNumber, apiKey, apiPassword);
+            log.warn(`[acme-dns-01-netcup] set called, dnsHost="${dnsHost}" value="${dnsAuthorization}"`);
+            let apisessionid;
             try {
-                const { rootDomain, hostname } = await findZone(dnsHost, customerNumber, apiKey, apisessionid);
-                console.warn(`[acme-dns-01-netcup] set: creating TXT hostname="${hostname}" in zone="${rootDomain}"`);
+                apisessionid = await login(customerNumber, apiKey, apiPassword);
+            }
+            catch (err) {
+                log.error(`[acme-dns-01-netcup] set: login failed: ${err}`);
+                throw err;
+            }
+            try {
+                const { rootDomain, hostname } = await findZone(dnsHost, customerNumber, apiKey, apisessionid, log);
+                log.warn(`[acme-dns-01-netcup] set: creating TXT hostname="${hostname}" in zone="${rootDomain}"`);
                 const setResult = await apiCall('updateDnsRecords', {
                     customernumber: String(customerNumber),
                     apikey: apiKey,
@@ -143,7 +157,7 @@ function create(options) {
                         ],
                     },
                 });
-                console.warn(`[acme-dns-01-netcup] set: updateDnsRecords response=${JSON.stringify(setResult)}`);
+                log.warn(`[acme-dns-01-netcup] set: updateDnsRecords response=${JSON.stringify(setResult)}`);
             }
             finally {
                 await logout(customerNumber, apiKey, apisessionid);
@@ -152,10 +166,10 @@ function create(options) {
         },
         async get(data) {
             const { dnsHost, dnsAuthorization } = data.challenge;
-            console.warn(`[acme-dns-01-netcup] get: checking dnsHost="${dnsHost}"`);
+            log.warn(`[acme-dns-01-netcup] get: checking dnsHost="${dnsHost}"`);
             const apisessionid = await login(customerNumber, apiKey, apiPassword);
             try {
-                const { rootDomain, hostname } = await findZone(dnsHost, customerNumber, apiKey, apisessionid);
+                const { rootDomain, hostname } = await findZone(dnsHost, customerNumber, apiKey, apisessionid, log);
                 // Use throwOnError=false: error 5029 (no records) must return null, not throw
                 const recordsData = await apiCall('infoDnsRecords', {
                     customernumber: String(customerNumber),
@@ -165,12 +179,12 @@ function create(options) {
                 }, false);
                 const records = recordsData?.dnsrecords ?? [];
                 const found = records.find(r => r.type === 'TXT' && r.hostname === hostname && r.destination === dnsAuthorization);
-                console.warn(`[acme-dns-01-netcup] get: zone="${rootDomain}" hostname="${hostname}" found=${!!found} (${records.length} records total)`);
+                log.warn(`[acme-dns-01-netcup] get: zone="${rootDomain}" hostname="${hostname}" found=${!!found} (${records.length} records total)`);
                 return found ? { dnsAuthorization: found.destination } : null;
             }
             catch (err) {
                 // Any unexpected error: treat as "record not visible yet"
-                console.error(`[acme-dns-01-netcup] get: unexpected error (returning null): ${err}`);
+                log.error(`[acme-dns-01-netcup] get: unexpected error (returning null): ${err}`);
                 return null;
             }
             finally {
@@ -179,9 +193,10 @@ function create(options) {
         },
         async remove(data) {
             const { dnsHost, dnsAuthorization } = data.challenge;
+            log.warn(`[acme-dns-01-netcup] remove: dnsHost="${dnsHost}"`);
             const apisessionid = await login(customerNumber, apiKey, apiPassword);
             try {
-                const { rootDomain, hostname } = await findZone(dnsHost, customerNumber, apiKey, apisessionid);
+                const { rootDomain, hostname } = await findZone(dnsHost, customerNumber, apiKey, apisessionid, log);
                 // Use throwOnError=false: zone may have no records at all
                 const recordsData = await apiCall('infoDnsRecords', {
                     customernumber: String(customerNumber),

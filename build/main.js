@@ -170,7 +170,7 @@ class AcmeAdapter extends utils.Adapter {
                 // Netcup is bundled locally; all other modules are npm packages
                 if (this.config.dns01Module === 'acme-dns-01-netcup') {
                     const netcupModule = await import('./lib/acme-dns-01-netcup.js');
-                    thisChallenge = netcupModule.create(dns01Options);
+                    thisChallenge = netcupModule.create({ ...dns01Options, log: this.log });
                 }
                 else {
                     // Dynamic import - module name comes from config
