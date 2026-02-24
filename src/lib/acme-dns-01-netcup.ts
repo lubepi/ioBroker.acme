@@ -234,59 +234,12 @@ export function create(options: NetcupOptions): {
                 await logout(customerNumber, apiKey, apisessionid!);
             }
 
-            // Step 2: Poll the authoritative NS servers directly until the TXT record appears.
-            // We look up the NS servers for rootDomain, then query them directly every 10 s.
-            // This is more reliable than trusting the Netcup API state field, because "state=yes"
-            // seems to mean "internally processed" but the NS may still need a few extra seconds.
-            // Netcup serialises zone updates: if a remove() preceded this set(), the zone
-            // update queue may already contain one pending update (~4–5 min), which means
-            // our record is processed only after that — requiring up to ~10 min total.
-            // Use 120 attempts × 10 s = 20 min to safely cover two consecutive zone updates.
-            const maxAttempts = 120;
-            const retryDelayMs = 10_000; // 10 s per attempt → up to 20 min total
-
-            // Build a resolver that queries Netcup's authoritative NS servers for rootDomain.
-            let authResolver: Resolver;
-            try {
-                const nsNames = await publicResolver.resolveNs(rootDomain!);
-                const nsIps: string[] = [];
-                for (const ns of nsNames) {
-                    try {
-                        const ips = await publicResolver.resolve4(ns);
-                        nsIps.push(...ips);
-                    } catch {
-                        // ignore single NS lookup failures
-                    }
-                }
-                if (nsIps.length === 0) throw new Error('no NS IPs found');
-                authResolver = new Resolver();
-                authResolver.setServers(nsIps.map(ip => `${ip}:53`));
-                log.warn(`[acme-dns-01-netcup] set: authoritative NS for ${rootDomain}: ${nsIps.join(', ')}`);
-            } catch (err) {
-                log.warn(`[acme-dns-01-netcup] set: NS lookup failed (${err}), falling back to public resolvers`);
-                authResolver = publicResolver;
-            }
-
-            log.warn(`[acme-dns-01-netcup] set: polling authoritative NS for TXT record (every ${retryDelayMs / 1000}s, max ${maxAttempts} attempts = ${maxAttempts * retryDelayMs / 60000} min)...`);
-
-            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-                await new Promise<void>(resolve => setTimeout(resolve, retryDelayMs));
-
-                try {
-                    const results = await authResolver.resolveTxt(dnsHost);
-                    const found = results.flat().includes(dnsAuthorization);
-                    log.debug(`[acme-dns-01-netcup] set: TXT lookup attempt ${attempt}/${maxAttempts}: found=${found}`);
-                    if (found) {
-                        log.warn(`[acme-dns-01-netcup] set: TXT record confirmed on authoritative NS after attempt ${attempt}/${maxAttempts}`);
-                        return null;
-                    }
-                } catch (err: any) {
-                    // ENOTFOUND / ENODATA = record not yet visible, keep polling
-                    log.debug(`[acme-dns-01-netcup] set: TXT lookup attempt ${attempt}/${maxAttempts}: ${err.code ?? err.message}`);
-                }
-            }
-
-            throw new Error(`[acme-dns-01-netcup] TXT record "${dnsHost}" not visible on authoritative NS after ${maxAttempts} attempts (${maxAttempts * retryDelayMs / 60000} min)`);  
+            // Record created. Polling for propagation is handled by the acme.dns01 Pre-Flight
+            // override in main.ts, which runs immediately after set() returns (propagationDelay=0).
+            // This ensures the LE challenge POST happens the instant the record is confirmed,
+            // avoiding any window in which the authorization could be marked invalid by LE.
+            log.warn(`[acme-dns-01-netcup] set: TXT record created; propagation check delegated to acme.dns01 override`);
+            return null;
         },
 
         async get(data: ChallengeData): Promise<{ dnsAuthorization: string } | null> {
