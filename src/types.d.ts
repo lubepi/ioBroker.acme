@@ -73,6 +73,7 @@ export interface AcmeAdapterConfig {
     dns01Otoken: string;
     dns01Ousername: string;
     dns01OverifyPropagation: boolean;
+    dns01PpropagationDelay: number;
     dns01OcustomerNumber: string;
     dns01OapiPassword: string;
     collections: [
