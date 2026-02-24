@@ -1,6 +1,7 @@
 'use strict';
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.create = create;
+const node_dns_1 = require("node:dns");
 /**
  * ACME DNS-01 challenge handler for Netcup CCP DNS API
  *
@@ -122,8 +123,9 @@ function create(options) {
     }
     log.warn(`[acme-dns-01-netcup] create() called, customerNumber="${customerNumber}"`);
     return {
-        // Default propagation delay of 30s; can be overridden via dns01PpropagationDelay in adapter config.
-        propagationDelay: 30000,
+        // Small initial delay before get() starts polling DNS.
+        // The real waiting happens inside get() which retries for up to 15 min.
+        propagationDelay: 10000,
         async init() {
             return null;
         },
@@ -166,30 +168,32 @@ function create(options) {
         },
         async get(data) {
             const { dnsHost, dnsAuthorization } = data.challenge;
-            log.warn(`[acme-dns-01-netcup] get: checking dnsHost="${dnsHost}"`);
-            const apisessionid = await login(customerNumber, apiKey, apiPassword);
-            try {
-                const { rootDomain, hostname } = await findZone(dnsHost, customerNumber, apiKey, apisessionid, log);
-                // Use throwOnError=false: error 5029 (no records) must return null, not throw
-                const recordsData = await apiCall('infoDnsRecords', {
-                    customernumber: String(customerNumber),
-                    apikey: apiKey,
-                    apisessionid,
-                    domainname: rootDomain,
-                }, false);
-                const records = recordsData?.dnsrecords ?? [];
-                const found = records.find(r => r.type === 'TXT' && r.hostname === hostname && r.destination === dnsAuthorization);
-                log.warn(`[acme-dns-01-netcup] get: zone="${rootDomain}" hostname="${hostname}" found=${!!found} (${records.length} records total)`);
-                return found ? { dnsAuthorization: found.destination } : null;
+            log.warn(`[acme-dns-01-netcup] get: polling DNS for dnsHost="${dnsHost}"`);
+            // Poll actual public DNS resolution – only return success once the
+            // TXT record is actually resolvable. This handles Netcup's propagation
+            // delay (records start with state="unknown" after creation).
+            const maxAttempts = 30;
+            const retryDelayMs = 30000; // 30 s per attempt → up to 15 min total
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                try {
+                    const results = await node_dns_1.promises.resolveTxt(dnsHost);
+                    const flat = results.flat();
+                    if (flat.includes(dnsAuthorization)) {
+                        log.warn(`[acme-dns-01-netcup] get: DNS record confirmed after attempt ${attempt}/${maxAttempts}`);
+                        return { dnsAuthorization };
+                    }
+                    log.warn(`[acme-dns-01-netcup] get: TXT record not yet present (attempt ${attempt}/${maxAttempts}), waiting ${retryDelayMs / 1000}s...`);
+                }
+                catch (err) {
+                    // ENOTFOUND / ENODATA = record not yet propagated
+                    log.warn(`[acme-dns-01-netcup] get: DNS lookup failed (attempt ${attempt}/${maxAttempts}): ${err.code ?? err.message} – waiting ${retryDelayMs / 1000}s...`);
+                }
+                if (attempt < maxAttempts) {
+                    await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+                }
             }
-            catch (err) {
-                // Any unexpected error: treat as "record not visible yet"
-                log.error(`[acme-dns-01-netcup] get: unexpected error (returning null): ${err}`);
-                return null;
-            }
-            finally {
-                await logout(customerNumber, apiKey, apisessionid);
-            }
+            log.error(`[acme-dns-01-netcup] get: DNS record "${dnsHost}" not found after ${maxAttempts} attempts (${(maxAttempts * retryDelayMs) / 60000} min total)`);
+            return null;
         },
         async remove(data) {
             const { dnsHost, dnsAuthorization } = data.challenge;
