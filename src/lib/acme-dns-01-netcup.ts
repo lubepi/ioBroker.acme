@@ -139,7 +139,7 @@ async function findZone(
         // An empty {} response (sometimes returned by Netcup for subdomains) must NOT be accepted.
         if (result !== null && typeof result === 'object' && result.name) {
             const hostname = parts.slice(0, i).join('.') || '@';
-            console.log(`[acme-dns-01-netcup] findZone: "${fullDomain}" → zone="${candidate}", hostname="${hostname}"`);
+            console.warn(`[acme-dns-01-netcup] findZone: "${fullDomain}" → zone="${candidate}", hostname="${hostname}"`);
             return { rootDomain: candidate, hostname };
         }
     }
@@ -178,13 +178,14 @@ export function create(options: NetcupOptions): {
 
         async set(data: ChallengeData): Promise<null> {
             const { dnsHost, dnsAuthorization } = data.challenge;
-            console.log(`[acme-dns-01-netcup] set called, full data: ${JSON.stringify(data)}`);
+            console.warn(`[acme-dns-01-netcup] set called, dnsHost="${dnsHost}" value="${dnsAuthorization}"`);
 
             const apisessionid = await login(customerNumber, apiKey, apiPassword);
             try {
                 const { rootDomain, hostname } = await findZone(dnsHost, customerNumber, apiKey, apisessionid);
-                console.log(`[acme-dns-01-netcup] set: creating TXT record hostname="${hostname}" in zone="${rootDomain}"`);
-                await apiCall('updateDnsRecords', {
+                console.warn(`[acme-dns-01-netcup] set: creating TXT hostname="${hostname}" in zone="${rootDomain}"`);
+
+                const setResult = await apiCall('updateDnsRecords', {
                     customernumber: String(customerNumber),
                     apikey: apiKey,
                     apisessionid,
@@ -200,7 +201,7 @@ export function create(options: NetcupOptions): {
                         ],
                     },
                 });
-                console.log(`[acme-dns-01-netcup] set: TXT record created successfully`);
+                console.warn(`[acme-dns-01-netcup] set: updateDnsRecords response=${JSON.stringify(setResult)}`);
             } finally {
                 await logout(customerNumber, apiKey, apisessionid);
             }
@@ -209,7 +210,7 @@ export function create(options: NetcupOptions): {
 
         async get(data: ChallengeData): Promise<{ dnsAuthorization: string } | null> {
             const { dnsHost, dnsAuthorization } = data.challenge;
-            console.log(`[acme-dns-01-netcup] get: checking dnsHost="${dnsHost}"`);
+            console.warn(`[acme-dns-01-netcup] get: checking dnsHost="${dnsHost}"`);
 
             const apisessionid = await login(customerNumber, apiKey, apiPassword);
             try {
@@ -230,7 +231,7 @@ export function create(options: NetcupOptions): {
                 const found = records.find(
                     r => r.type === 'TXT' && r.hostname === hostname && r.destination === dnsAuthorization,
                 );
-                console.log(`[acme-dns-01-netcup] get: zone="${rootDomain}" hostname="${hostname}" found=${!!found} (${records.length} records total)`);
+                console.warn(`[acme-dns-01-netcup] get: zone="${rootDomain}" hostname="${hostname}" found=${!!found} (${records.length} records total)`);
                 return found ? { dnsAuthorization: found.destination } : null;
             } catch (err) {
                 // Any unexpected error: treat as "record not visible yet"
