@@ -214,6 +214,15 @@ class AcmeAdapter extends utils.Adapter {
                 for (const [key, value] of Object.entries(dns01Props)) {
                     (thisChallenge as any)[key] = value;
                 }
+                // The Netcup set() method polls until the TXT record is confirmed
+                // on public DNS (1.1.1.1/8.8.8.8), so no additional propagation
+                // delay is needed. Forcing 0 prevents acme.js from waiting an
+                // extra propagationDelay ms before its Pre-Flight DNS check,
+                // which could race against DNS cache expiry on 1.1.1.1.
+                if (this.config.dns01Module === 'acme-dns-01-netcup') {
+                    (thisChallenge as any).propagationDelay = 0;
+                    this.log.debug('dns-01: propagationDelay set to 0 for Netcup (set() handles propagation internally)');
+                }
                 this.challenges['dns-01'] = thisChallenge;
             }
         }
