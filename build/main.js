@@ -48,6 +48,7 @@ const keypairs_1 = __importDefault(require("@root/keypairs"));
 const csr_1 = __importDefault(require("@root/csr"));
 const pem_1 = __importDefault(require("@root/pem"));
 const x509_js_1 = __importDefault(require("x509.js"));
+const node_dns_1 = require("node:dns");
 const package_json_1 = __importDefault(require("../package.json"));
 const http_01_challenge_server_1 = require("./lib/http-01-challenge-server");
 const accountObjectId = 'account';
@@ -73,6 +74,10 @@ class AcmeAdapter extends utils.Adapter {
      * Is called when databases are connected and adapter received configuration.
      */
     async onReady() {
+        // Override system DNS resolver globally so that acme.js's internal
+        // dns.resolveTxt() checks also use public resolvers instead of the
+        // potentially stale local/router resolver cache.
+        (0, node_dns_1.setServers)(['1.1.1.1', '8.8.8.8']);
         this.log.debug(`config: ${JSON.stringify(this.config)}`);
         this.certManager = new webserver_1.CertificateManager({ adapter: this });
         if (!this.config?.collections?.length) {
