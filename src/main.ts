@@ -292,19 +292,46 @@ class AcmeAdapter extends utils.Adapter {
                     `(every ${retryDelayMs / 1000}s, max ${maxAttempts} attempts = ${maxAttempts * retryDelayMs / 60_000} min)...`,
                 );
 
+                let foundRecords: string[][] = [];
                 for (let attempt = 1; attempt <= maxAttempts; attempt++) {
                     try {
                         const records = await resolver.resolveTxt(ch.dnsHost);
                         if (records.length > 0) {
-                            this.log.warn(`acme.dns01: TXT record found after attempt ${attempt}/${maxAttempts} — submitting challenge to LE`);
-                            return { answer: records.map((rr: string[]) => ({ data: rr })) };
+                            this.log.warn(`acme.dns01: TXT record found on authoritative NS after attempt ${attempt}/${maxAttempts}`);
+                            foundRecords = records;
+                            break;
                         }
                     } catch { /* ENOTFOUND = not yet visible, keep polling */ }
                     this.log.debug(`acme.dns01: attempt ${attempt}/${maxAttempts}: not yet visible, waiting ${retryDelayMs / 1000}s...`);
                     await new Promise<void>(r => setTimeout(r, retryDelayMs));
                 }
 
-                throw new Error(`acme.dns01: TXT record not visible on authoritative NS after ${maxAttempts} attempts`);
+                if (foundRecords.length === 0) {
+                    throw new Error(`acme.dns01: TXT record not visible on authoritative NS after ${maxAttempts} attempts`);
+                }
+
+                // Additionally wait until the record is also visible on public resolvers
+                // (1.1.1.1 / 8.8.8.8), because LE's validators use recursive resolvers that
+                // may have cached a negative (NXDOMAIN) response from earlier attempts.
+                // Only submitting the challenge once public resolvers see the record too
+                // prevents LE from instantly failing the validation with a cached miss.
+                const maxPublicAttempts = 60; // 60 × 10 s = 10 min extra
+                this.log.warn(`acme.dns01: record on authoritative NS — now waiting for public resolvers (1.1.1.1/8.8.8.8) to see it...`);
+                for (let attempt = 1; attempt <= maxPublicAttempts; attempt++) {
+                    try {
+                        const records = await publicResolver.resolveTxt(ch.dnsHost);
+                        if (records.length > 0) {
+                            this.log.warn(`acme.dns01: TXT record confirmed on public resolver after ${attempt}/${maxPublicAttempts} extra attempts — submitting challenge to LE`);
+                            return { answer: records.map((rr: string[]) => ({ data: rr })) };
+                        }
+                    } catch { /* ENOTFOUND = not yet propagated to public resolver */ }
+                    this.log.debug(`acme.dns01: public resolver attempt ${attempt}/${maxPublicAttempts}: not yet visible, waiting ${retryDelayMs / 1000}s...`);
+                    await new Promise<void>(r => setTimeout(r, retryDelayMs));
+                }
+
+                // Public resolver didn't pick it up — submit anyway with authoritative NS result
+                this.log.warn(`acme.dns01: public resolver timeout — submitting challenge to LE with authoritative NS result`);
+                return { answer: foundRecords.map((rr: string[]) => ({ data: rr })) };
             };
             this.log.debug('acme.dns01 overridden: polls authoritative NS until record is visible, then immediately submits to LE');
 
