@@ -176,7 +176,6 @@ export function create(options: NetcupOptions): {
     get: (data: ChallengeData) => Promise<{ dnsAuthorization: string } | null>;
     remove: (data: ChallengeData) => Promise<null>;
     shutdown: () => void;
-    propagationDelay: number;
 } {
     const { customerNumber, apiKey, apiPassword } = options;
     const log: Logger = options.log ?? noopLogger;
@@ -188,10 +187,6 @@ export function create(options: NetcupOptions): {
     log.warn(`[acme-dns-01-netcup] create() called, customerNumber="${customerNumber}"`);
 
     return {
-        // Small initial delay before get() starts polling DNS.
-        // The real waiting happens inside get() which retries for up to 15 min.
-        propagationDelay: 10000,
-
         async init(): Promise<null> {
             return null;
         },
