@@ -335,6 +335,7 @@
         "collections": {
           "type": "custom",
           "i18n": true,
+          "bundlerType": "esm",
           "url": "custom/customComponents.js",
           "name": "ConfigCustomAcmeSet/Components/AcmeComponent",
           "xs": 12,
