@@ -254,7 +254,7 @@ class AcmeAdapter extends utils.Adapter {
             // This function then polls the authoritative NS directly until the record
             // is visible — and only then returns, so that acme.js immediately POSTs
             // the challenge to LE while the authorization is still fresh/pending.
-            (this.acme as any).dns01 = async (ch: { dnsHost: string }) => {
+            (this.acme as any).dns01 = async (ch: { dnsHost: string; dnsAuthorization: string }) => {
                 const labels = ch.dnsHost.split('.');
                 const zone = labels.slice(-2).join('.');
 
@@ -292,25 +292,35 @@ class AcmeAdapter extends utils.Adapter {
                     `(every ${retryDelayMs / 1000}s, max ${maxAttempts} attempts = ${maxAttempts * retryDelayMs / 60_000} min)...`,
                 );
 
+                // The expected value for this specific challenge attempt
+                const expectedValue = ch.dnsAuthorization;
+                this.log.debug(`acme.dns01: waiting for TXT value: ${expectedValue}`);
+
                 let foundRecords: string[][] = [];
                 for (let attempt = 1; attempt <= maxAttempts; attempt++) {
                     try {
                         const records = await resolver.resolveTxt(ch.dnsHost);
-                        if (records.length > 0) {
-                            this.log.warn(`acme.dns01: TXT record found on authoritative NS after attempt ${attempt}/${maxAttempts}`);
+                        // Must find the specific expected value — not just any stale TXT record
+                        const hasExpected = records.flat().includes(expectedValue);
+                        if (hasExpected) {
+                            this.log.warn(`acme.dns01: correct TXT value found on authoritative NS after attempt ${attempt}/${maxAttempts}`);
                             foundRecords = records;
                             break;
+                        } else if (records.length > 0) {
+                            this.log.debug(`acme.dns01: attempt ${attempt}/${maxAttempts}: found ${records.length} TXT record(s) but none match expected value (stale records still present), waiting ${retryDelayMs / 1000}s...`);
                         }
                     } catch { /* ENOTFOUND = not yet visible, keep polling */ }
-                    this.log.debug(`acme.dns01: attempt ${attempt}/${maxAttempts}: not yet visible, waiting ${retryDelayMs / 1000}s...`);
-                    await new Promise<void>(r => setTimeout(r, retryDelayMs));
+                    if (foundRecords.length === 0) {
+                        this.log.debug(`acme.dns01: attempt ${attempt}/${maxAttempts}: not yet visible, waiting ${retryDelayMs / 1000}s...`);
+                        await new Promise<void>(r => setTimeout(r, retryDelayMs));
+                    }
                 }
 
                 if (foundRecords.length === 0) {
                     throw new Error(`acme.dns01: TXT record not visible on authoritative NS after ${maxAttempts} attempts`);
                 }
 
-                // Additionally wait until the record is also visible on public resolvers
+                // Additionally wait until the correct value is also visible on public resolvers
                 // (1.1.1.1 / 8.8.8.8), because LE's validators use recursive resolvers that
                 // may have cached a negative (NXDOMAIN) response from earlier attempts.
                 // Only submitting the challenge once public resolvers see the record too
@@ -320,9 +330,12 @@ class AcmeAdapter extends utils.Adapter {
                 for (let attempt = 1; attempt <= maxPublicAttempts; attempt++) {
                     try {
                         const records = await publicResolver.resolveTxt(ch.dnsHost);
-                        if (records.length > 0) {
-                            this.log.warn(`acme.dns01: TXT record confirmed on public resolver after ${attempt}/${maxPublicAttempts} extra attempts — submitting challenge to LE`);
+                        const hasExpected = records.flat().includes(expectedValue);
+                        if (hasExpected) {
+                            this.log.warn(`acme.dns01: correct TXT value confirmed on public resolver after ${attempt}/${maxPublicAttempts} extra attempts — submitting challenge to LE`);
                             return { answer: records.map((rr: string[]) => ({ data: rr })) };
+                        } else if (records.length > 0) {
+                            this.log.debug(`acme.dns01: public resolver attempt ${attempt}/${maxPublicAttempts}: found TXT records but not the expected value yet, waiting ${retryDelayMs / 1000}s...`);
                         }
                     } catch { /* ENOTFOUND = not yet propagated to public resolver */ }
                     this.log.debug(`acme.dns01: public resolver attempt ${attempt}/${maxPublicAttempts}: not yet visible, waiting ${retryDelayMs / 1000}s...`);
