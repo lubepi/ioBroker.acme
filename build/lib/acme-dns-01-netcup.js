@@ -171,8 +171,12 @@ function create(options) {
             // We look up the NS servers for rootDomain, then query them directly every 10 s.
             // This is more reliable than trusting the Netcup API state field, because "state=yes"
             // seems to mean "internally processed" but the NS may still need a few extra seconds.
-            const maxAttempts = 60;
-            const retryDelayMs = 10000; // 10 s per attempt → up to 10 min total
+            // Netcup serialises zone updates: if a remove() preceded this set(), the zone
+            // update queue may already contain one pending update (~4–5 min), which means
+            // our record is processed only after that — requiring up to ~10 min total.
+            // Use 120 attempts × 10 s = 20 min to safely cover two consecutive zone updates.
+            const maxAttempts = 120;
+            const retryDelayMs = 10000; // 10 s per attempt → up to 20 min total
             // Build a resolver that queries Netcup's authoritative NS servers for rootDomain.
             let authResolver;
             try {
@@ -197,7 +201,7 @@ function create(options) {
                 log.warn(`[acme-dns-01-netcup] set: NS lookup failed (${err}), falling back to public resolvers`);
                 authResolver = publicResolver;
             }
-            log.warn(`[acme-dns-01-netcup] set: polling authoritative NS for TXT record (every ${retryDelayMs / 1000}s, max ${maxAttempts} attempts)...`);
+            log.warn(`[acme-dns-01-netcup] set: polling authoritative NS for TXT record (every ${retryDelayMs / 1000}s, max ${maxAttempts} attempts = ${maxAttempts * retryDelayMs / 60000} min)...`);
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
                 await new Promise(resolve => setTimeout(resolve, retryDelayMs));
                 try {
@@ -214,7 +218,7 @@ function create(options) {
                     log.debug(`[acme-dns-01-netcup] set: TXT lookup attempt ${attempt}/${maxAttempts}: ${err.code ?? err.message}`);
                 }
             }
-            throw new Error(`[acme-dns-01-netcup] TXT record "${dnsHost}" not visible on authoritative NS after ${maxAttempts} attempts`);
+            throw new Error(`[acme-dns-01-netcup] TXT record "${dnsHost}" not visible on authoritative NS after ${maxAttempts} attempts (${maxAttempts * retryDelayMs / 60000} min)`);
         },
         async get(data) {
             const { dnsHost, dnsAuthorization } = data.challenge;
