@@ -277,12 +277,21 @@ export function create(options: NetcupOptions): {
                 );
 
                 const records: DnsRecord[] = recordsData?.dnsrecords ?? [];
+                // Delete ALL TXT records for this hostname, not just the current one.
+                // Records from previous failed/interrupted runs accumulate in Netcup DNS
+                // because their dnsAuthorization values are no longer known to remove().
+                // It is safe to delete all of them here: remove() is only called by
+                // acme.js after LE has successfully validated the challenge.
                 const toDelete = records
-                    .filter(r => r.type === 'TXT' && r.hostname === hostname && r.destination === dnsAuthorization)
+                    .filter(r => r.type === 'TXT' && r.hostname === hostname)
                     .map(r => ({ ...r, deleterecord: true }));
 
                 if (toDelete.length === 0) {
+                    log.warn(`[acme-dns-01-netcup] remove: no TXT records found for hostname="${hostname}" in zone="${rootDomain}"`);
                     return null;
+                }
+                if (toDelete.length > 1) {
+                    log.warn(`[acme-dns-01-netcup] remove: deleting ${toDelete.length} TXT records for hostname="${hostname}" (including stale records from previous runs)`);
                 }
 
                 await apiCall('updateDnsRecords', {
