@@ -19,6 +19,10 @@ import pkg from '../package.json';
 import { create as createHttp01ChallengeServer } from './lib/http-01-challenge-server';
 import type { AcmeAdapterConfig } from './types';
 
+// Public DNS resolvers used as fallback when authoritative NS lookup fails.
+const publicResolver = new Resolver();
+publicResolver.setServers(['1.1.1.1', '8.8.8.8']);
+
 const accountObjectId = 'account';
 // Renew 7 days before expiry
 const renewWindow = 60 * 60 * 24 * 7 * 1000;
@@ -245,19 +249,48 @@ class AcmeAdapter extends utils.Adapter {
             });
             await this.acme!.init(directoryUrl);
 
-            // Override acme.js's internal DNS-01 Pre-Flight check to use public resolvers.
+            // Override acme.js's internal DNS-01 Pre-Flight check.
             // The default uses promisify(require('dns').resolveTxt) which is bound at
-            // module load time and ignores dns.setServers() calls made later.
-            // By overriding acme.dns01 here, we force 1.1.1.1/8.8.8.8 for the dry-run check.
-            const publicDnsResolver = new Resolver();
-            publicDnsResolver.setServers(['1.1.1.1', '8.8.8.8']);
+            // module load time and cannot be changed via dns.setServers() later.
+            // We override it to query the authoritative nameservers for the zone directly,
+            // so that the check succeeds as soon as state="yes" in the Netcup API
+            // (i.e. immediately after our set() returns), without relying on public caches.
             (this.acme as any).dns01 = async (ch: { dnsHost: string }) => {
-                const records = await publicDnsResolver.resolveTxt(ch.dnsHost);
+                // Derive zone from dnsHost using last-two-labels heuristic
+                // (works for standard TLDs which is all Netcup supports)
+                const labels = ch.dnsHost.split('.');
+                const zone = labels.slice(-2).join('.');
+
+                let resolver: Resolver;
+                try {
+                    // Look up authoritative NS for the zone and resolve their IPs
+                    const nsNames = await publicResolver.resolveNs(zone);
+                    const nsIps: string[] = [];
+                    for (const ns of nsNames.slice(0, 3)) {
+                        try {
+                            const addrs = await publicResolver.resolve4(ns);
+                            nsIps.push(...addrs.map((ip: string) => `${ip}:53`));
+                        } catch { /* skip */ }
+                    }
+                    if (nsIps.length > 0) {
+                        resolver = new Resolver();
+                        resolver.setServers(nsIps);
+                        this.log.debug(`acme.dns01: using authoritative NS for ${zone}: ${nsIps.join(', ')}`);
+                    } else {
+                        resolver = publicResolver;
+                        this.log.debug(`acme.dns01: NS lookup empty, falling back to public resolvers`);
+                    }
+                } catch {
+                    resolver = publicResolver;
+                    this.log.debug(`acme.dns01: NS lookup failed, falling back to public resolvers`);
+                }
+
+                const records = await resolver.resolveTxt(ch.dnsHost);
                 return {
                     answer: records.map((rr: string[]) => ({ data: rr })),
                 };
             };
-            this.log.debug('acme.dns01 overridden to use public DNS resolvers (1.1.1.1, 8.8.8.8)');
+            this.log.debug('acme.dns01 overridden to use authoritative NS resolvers');
 
             // Try and load a saved object
             const accountObject = await this.getObjectAsync(accountObjectId);

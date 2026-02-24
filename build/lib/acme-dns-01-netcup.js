@@ -2,7 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.create = create;
 const promises_1 = require("node:dns/promises");
-// Use public resolvers to avoid stale negative cache on the ioBroker host.
+// Fallback public resolvers (used by get() for quick confirmation check).
 const publicResolver = new promises_1.Resolver();
 publicResolver.setServers(['1.1.1.1', '8.8.8.8']);
 /**
@@ -132,6 +132,9 @@ function create(options) {
         async set(data) {
             const { dnsHost, dnsAuthorization } = data.challenge;
             log.warn(`[acme-dns-01-netcup] set called, dnsHost="${dnsHost}" value="${dnsAuthorization}"`);
+            // Step 1: Create the TXT record via Netcup API
+            let rootDomain;
+            let hostname;
             let apisessionid;
             try {
                 apisessionid = await login(customerNumber, apiKey, apiPassword);
@@ -141,7 +144,7 @@ function create(options) {
                 throw err;
             }
             try {
-                const { rootDomain, hostname } = await findZone(dnsHost, customerNumber, apiKey, apisessionid, log);
+                ({ rootDomain, hostname } = await findZone(dnsHost, customerNumber, apiKey, apisessionid, log));
                 log.warn(`[acme-dns-01-netcup] set: creating TXT hostname="${hostname}" in zone="${rootDomain}"`);
                 const setResult = await apiCall('updateDnsRecords', {
                     customernumber: String(customerNumber),
@@ -164,27 +167,43 @@ function create(options) {
             finally {
                 await logout(customerNumber, apiKey, apisessionid);
             }
-            // Poll public DNS until the TXT record is resolvable.
-            // acme.js does its own dns.resolveTxt() check immediately after set() returns,
-            // so we must not return until the record is actually visible in DNS.
-            const maxAttempts = 30;
-            const retryDelayMs = 30000; // 30 s per attempt → up to 15 min total
-            log.warn(`[acme-dns-01-netcup] set: waiting for DNS propagation (polling every ${retryDelayMs / 1000}s, max ${maxAttempts} attempts)...`);
+            // Step 2: Poll via Netcup API until the TXT record state changes to "yes".
+            // "yes" means the record is published on Netcup's authoritative nameservers.
+            // This is much faster than polling public DNS resolvers (no cache propagation needed).
+            const maxAttempts = 40;
+            const retryDelayMs = 10000; // 10 s per attempt → up to ~7 min total
+            log.warn(`[acme-dns-01-netcup] set: polling Netcup API for state="yes" (every ${retryDelayMs / 1000}s, max ${maxAttempts} attempts)...`);
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-                try {
-                    const results = await publicResolver.resolveTxt(dnsHost);
-                    {
-                        log.warn(`[acme-dns-01-netcup] set: DNS record confirmed after attempt ${attempt}/${maxAttempts}`);
-                        return null;
-                    }
-                    log.warn(`[acme-dns-01-netcup] set: TXT not yet visible (attempt ${attempt}/${maxAttempts}), waiting...`);
-                }
-                catch (err) {
-                    log.warn(`[acme-dns-01-netcup] set: DNS lookup failed (attempt ${attempt}/${maxAttempts}): ${err.code ?? err.message}, waiting...`);
-                }
                 await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+                const sess = await login(customerNumber, apiKey, apiPassword);
+                let records = [];
+                try {
+                    const recordsData = await apiCall('infoDnsRecords', {
+                        customernumber: String(customerNumber),
+                        apikey: apiKey,
+                        apisessionid: sess,
+                        domainname: rootDomain,
+                    }, false);
+                    records = recordsData?.dnsrecords ?? [];
+                }
+                finally {
+                    await logout(customerNumber, apiKey, sess);
+                }
+                const targetRecord = records.find(r => r.type === 'TXT' && r.hostname === hostname && r.destination === dnsAuthorization);
+                if (!targetRecord) {
+                    log.warn(`[acme-dns-01-netcup] set: record not found in API (attempt ${attempt}/${maxAttempts}), retrying...`);
+                    continue;
+                }
+                const state = targetRecord.state;
+                log.debug(`[acme-dns-01-netcup] set: record state="${state}" (attempt ${attempt}/${maxAttempts})`);
+                if (state === 'yes') {
+                    log.warn(`[acme-dns-01-netcup] set: record published on authoritative NS after attempt ${attempt}/${maxAttempts}`);
+                    return null;
+                }
+                log.warn(`[acme-dns-01-netcup] set: state is still "${state}" (attempt ${attempt}/${maxAttempts}), waiting...`);
             }
-            throw new Error(`[acme-dns-01-netcup] DNS record "${dnsHost}" not visible after ${maxAttempts} attempts`);
+            throw new Error(`[acme-dns-01-netcup] DNS record "${dnsHost}" did not reach state="yes" after ${maxAttempts} attempts`);
+            throw new Error(`[acme-dns-01-netcup] DNS record "${dnsHost}" did not reach state="yes" after ${maxAttempts} attempts`);
         },
         async get(data) {
             const { dnsHost, dnsAuthorization } = data.challenge;
