@@ -1,6 +1,10 @@
 'use strict';
 
-import { promises as dns } from 'node:dns';
+import { Resolver } from 'node:dns/promises';
+
+// Use public resolvers to avoid stale negative cache on the ioBroker host.
+const publicResolver = new Resolver();
+publicResolver.setServers(['1.1.1.1', '8.8.8.8']);
 
 /**
  * ACME DNS-01 challenge handler for Netcup CCP DNS API
@@ -236,8 +240,7 @@ export function create(options: NetcupOptions): {
 
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
                 try {
-                    const results = await dns.resolveTxt(dnsHost);
-                    if (results.flat().includes(dnsAuthorization)) {
+                    const results = await publicResolver.resolveTxt(dnsHost); {
                         log.warn(`[acme-dns-01-netcup] set: DNS record confirmed after attempt ${attempt}/${maxAttempts}`);
                         return null;
                     }
@@ -256,7 +259,7 @@ export function create(options: NetcupOptions): {
             log.warn(`[acme-dns-01-netcup] get: checking dnsHost="${dnsHost}"`);
             // set() already waited for DNS propagation, so this is just a quick confirmation.
             try {
-                const results = await dns.resolveTxt(dnsHost);
+                const results = await publicResolver.resolveTxt(dnsHost);
                 const found = results.flat().includes(dnsAuthorization);
                 log.warn(`[acme-dns-01-netcup] get: found=${found}`);
                 return found ? { dnsAuthorization } : null;

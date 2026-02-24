@@ -1,7 +1,10 @@
 'use strict';
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.create = create;
-const node_dns_1 = require("node:dns");
+const promises_1 = require("node:dns/promises");
+// Use public resolvers to avoid stale negative cache on the ioBroker host.
+const publicResolver = new promises_1.Resolver();
+publicResolver.setServers(['1.1.1.1', '8.8.8.8']);
 /**
  * ACME DNS-01 challenge handler for Netcup CCP DNS API
  *
@@ -169,8 +172,8 @@ function create(options) {
             log.warn(`[acme-dns-01-netcup] set: waiting for DNS propagation (polling every ${retryDelayMs / 1000}s, max ${maxAttempts} attempts)...`);
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
                 try {
-                    const results = await node_dns_1.promises.resolveTxt(dnsHost);
-                    if (results.flat().includes(dnsAuthorization)) {
+                    const results = await publicResolver.resolveTxt(dnsHost);
+                    {
                         log.warn(`[acme-dns-01-netcup] set: DNS record confirmed after attempt ${attempt}/${maxAttempts}`);
                         return null;
                     }
@@ -188,7 +191,7 @@ function create(options) {
             log.warn(`[acme-dns-01-netcup] get: checking dnsHost="${dnsHost}"`);
             // set() already waited for DNS propagation, so this is just a quick confirmation.
             try {
-                const results = await node_dns_1.promises.resolveTxt(dnsHost);
+                const results = await publicResolver.resolveTxt(dnsHost);
                 const found = results.flat().includes(dnsAuthorization);
                 log.warn(`[acme-dns-01-netcup] get: found=${found}`);
                 return found ? { dnsAuthorization } : null;
