@@ -68,7 +68,7 @@
     "lint": "eslint -c eslint.config.mjs",
     "prepublishOnly": "npm run build",
     "build:tsc": "tsc -p tsconfig.build.json",
-    "build": "node tasks",
+    "build": "tsc -p tsconfig.build.json && node tasks",
     "translate": "translate-adapter",
     "dev-server": "dev-server",
     "release": "release-script",
