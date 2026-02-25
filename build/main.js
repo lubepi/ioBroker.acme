@@ -77,7 +77,14 @@ class AcmeAdapter extends utils.Adapter {
      * Is called when databases are connected and adapter received configuration.
      */
     async onReady() {
-        this.log.debug(`config: ${JSON.stringify(this.config)}`);
+        // Log config without sensitive fields
+        const safeConfig = { ...this.config };
+        for (const key of Object.keys(safeConfig)) {
+            if (/api|key|secret|password|token/i.test(key) && typeof safeConfig[key] === 'string' && safeConfig[key].length > 0) {
+                safeConfig[key] = '***';
+            }
+        }
+        this.log.debug(`config: ${JSON.stringify(safeConfig)}`);
         this.certManager = new webserver_1.CertificateManager({ adapter: this });
         if (!this.config?.collections?.length) {
             this.terminate('No collections configured - nothing to order');
@@ -167,7 +174,14 @@ class AcmeAdapter extends utils.Adapter {
                     dns01Options.baseUrl = 'https://api.namecheap.com/xml.response';
                     break;
             }
-            this.log.debug(`dns-01 options: ${JSON.stringify(dns01Options)}`);
+            // Log options without exposing credentials
+            const safeOpts = { ...dns01Options };
+            for (const key of Object.keys(safeOpts)) {
+                if (/api|key|secret|password|token/i.test(key) && typeof safeOpts[key] === 'string' && safeOpts[key].length > 0) {
+                    safeOpts[key] = '***';
+                }
+            }
+            this.log.debug(`dns-01 options: ${JSON.stringify(safeOpts)}`);
             // Do this inside try... catch as the module is configurable
             let thisChallenge;
             try {
@@ -277,7 +291,7 @@ class AcmeAdapter extends utils.Adapter {
                         const records = await resolver.resolveTxt(ch.dnsHost);
                         // Must find the specific expected value — not just any stale TXT record
                         if (records.flat().includes(expectedValue)) {
-                            this.log.info(`acme.dns01: correct TXT value found on authoritative NS after attempt ${attempt}/${maxAttempts}`);
+                            this.log.debug(`acme.dns01: correct TXT value found on authoritative NS after attempt ${attempt}/${maxAttempts}`);
                             foundRecords = records;
                             break;
                         }
@@ -301,7 +315,7 @@ class AcmeAdapter extends utils.Adapter {
                 // Only submitting the challenge once public resolvers see the record too
                 // prevents LE from instantly failing the validation with a cached miss.
                 const maxPublicAttempts = 60; // 60 × 10 s = 10 min extra
-                this.log.info(`acme.dns01: TXT confirmed on authoritative NS — now waiting for public resolvers (1.1.1.1/8.8.8.8) to see it...`);
+                this.log.info(`acme.dns01: ${ch.dnsHost} visible on authoritative NS — waiting for public resolvers...`);
                 for (let attempt = 1; attempt <= maxPublicAttempts; attempt++) {
                     try {
                         const records = await publicResolver.resolveTxt(ch.dnsHost);
@@ -330,13 +344,13 @@ class AcmeAdapter extends utils.Adapter {
             if (accountObject) {
                 this.log.debug(`Loaded existing ACME account: ${JSON.stringify(accountObject)}`);
                 if (accountObject.native?.maintainerEmail !== this.config.maintainerEmail) {
-                    this.log.warn('Saved account does not match maintainer email, will recreate.');
+                    this.log.info('Saved account does not match maintainer email, will recreate.');
                 }
                 else if (accountObject.native?.useStaging === undefined) {
-                    this.log.warn('Saved account is missing staging/production flag (old format), will recreate.');
+                    this.log.info('Saved account is missing staging/production flag (old format), will recreate.');
                 }
                 else if (accountObject.native?.useStaging !== this.config.useStaging) {
-                    this.log.warn(`Saved account was created for ${accountObject.native.useStaging ? 'staging' : 'production'} LE, but current config uses ${this.config.useStaging ? 'staging' : 'production'} — will recreate.`);
+                    this.log.info(`Saved account was created for ${accountObject.native.useStaging ? 'staging' : 'production'} LE, but current config uses ${this.config.useStaging ? 'staging' : 'production'} — will recreate.`);
                 }
                 else {
                     this.account = accountObject.native;
@@ -349,14 +363,14 @@ class AcmeAdapter extends utils.Adapter {
                     kty: 'EC',
                     format: 'jwk',
                 });
-                this.log.debug(`accountKeypair: ${JSON.stringify(accountKeypair)}`);
+                this.log.debug('New account keypair generated');
                 this.account.key = accountKeypair.private;
                 this.account.full = await this.acme.accounts.create({
                     subscriberEmail: this.config.maintainerEmail,
                     agreeToTerms: true,
                     accountKey: this.account.key,
                 });
-                this.log.debug(`Created account: ${JSON.stringify(this.account)}`);
+                this.log.debug(`Created ACME account (kid: ${this.account.full?.key?.kid ?? 'unknown'})`);
                 await this.extendObjectAsync(accountObjectId, {
                     native: { ...this.account, maintainerEmail: this.config.maintainerEmail, useStaging: this.config.useStaging },
                 });
@@ -487,21 +501,21 @@ class AcmeAdapter extends utils.Adapter {
             create = true;
         }
         else {
-            this.log.debug(`Existing: ${collection.id}: ${JSON.stringify(existingCollection)}`);
+            this.log.debug(`Existing collection "${collection.id}": domains=${JSON.stringify(existingCollection.domains)}, staging=${existingCollection.staging}, expires=${existingCollection.tsExpires ? new Date(existingCollection.tsExpires).toISOString() : 'unknown'}`);
             try {
                 // Decode certificate to check not due for renewal and parts match what is configured.
                 const crt = x509_js_1.default.parseCert(existingCollection.cert.toString());
                 this.log.debug(`Existing cert: ${JSON.stringify(crt)}`);
                 if (Date.now() > Date.parse(crt.notAfter) - renewWindow) {
-                    this.log.info(`Collection ${collection.id} expiring soon - will renew`);
+                    this.log.info(`Collection ${collection.id} expiring soon (notAfter: ${crt.notAfter}) - will renew`);
                     create = true;
                 }
                 else if (collection.commonName !== crt.subject.commonName) {
-                    this.log.info(`Collection ${collection.id} common name does not match - will renew`);
+                    this.log.info(`Collection ${collection.id} common name changed ("${crt.subject.commonName}" → "${collection.commonName}") - will renew`);
                     create = true;
                 }
                 else if (!this._arraysMatch(domains, crt.altNames)) {
-                    this.log.info(`Collection ${collection.id} alt names do not match - will renew`);
+                    this.log.info(`Collection ${collection.id} alt names changed (${JSON.stringify(crt.altNames)} → ${JSON.stringify(domains)}) - will renew`);
                     create = true;
                 }
                 else if (this.config.useStaging !== existingCollection.staging) {
@@ -572,10 +586,10 @@ class AcmeAdapter extends utils.Adapter {
                     collectionToSet = null;
                 }
                 if (collectionToSet) {
-                    this.log.debug(`${collection.id} is ${JSON.stringify(collectionToSet)}`);
+                    this.log.debug(`${collection.id}: domains=${JSON.stringify(collectionToSet.domains)}, expires=${new Date(collectionToSet.tsExpires).toISOString()}`);
                     // Save it
                     await this.certManager?.setCollection(collection.id, collectionToSet);
-                    this.log.info(`Collection ${collection.id} order success`);
+                    this.log.info(`Collection ${collection.id} order success for ${domains.join(', ')} (expires ${new Date(collectionToSet.tsExpires).toISOString()})`);
                 }
             }
         }
