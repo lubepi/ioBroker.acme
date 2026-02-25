@@ -190,7 +190,11 @@
     ]
   },
   "encryptedNative": [
-    "dns01OapiPassword"
+    "dns01OapiKey",
+    "dns01OapiPassword",
+    "dns01Okey",
+    "dns01Osecret",
+    "dns01Otoken"
   ],
   "objects": [],
   "instanceObjects": [

@@ -62,6 +62,7 @@ interface ChallengeData {
 
 /**
  * Send a JSON request to the Netcup CCP API.
+ *
  * @param throwOnError - if false, returns the raw response even on non-2xxx status (used by get/remove)
  */
 async function apiCall(action: string, param: Record<string, unknown>, throwOnError = true): Promise<any> {
@@ -169,7 +170,9 @@ async function findZone(
     // Fall back to last-two-labels heuristic
     const rootDomain = parts.slice(-2).join('.');
     const hostname = parts.slice(0, -2).join('.') || '@';
-    log.warn(`[acme-dns-01-netcup] findZone: no zone found via API for "${fullDomain}", using fallback zone="${rootDomain}", hostname="${hostname}"`);
+    log.warn(
+        `[acme-dns-01-netcup] findZone: no zone found via API for "${fullDomain}", using fallback zone="${rootDomain}", hostname="${hostname}"`,
+    );
     return { rootDomain, hostname };
 }
 
@@ -193,8 +196,8 @@ export function create(options: NetcupOptions): {
     log.debug(`[acme-dns-01-netcup] create() called, customerNumber="${customerNumber}"`);
 
     return {
-        async init(): Promise<null> {
-            return null;
+        init(): Promise<null> {
+            return Promise.resolve(null);
         },
 
         async set(data: ChallengeData): Promise<null> {
@@ -231,8 +234,12 @@ export function create(options: NetcupOptions): {
                         ],
                     },
                 });
-                const createdCount = setResult?.dnsrecords?.filter((r: DnsRecord) => r.type === 'TXT' && r.hostname === hostname).length ?? 0;
-                log.debug(`[acme-dns-01-netcup] set: updateDnsRecords OK (${createdCount} TXT record(s) for "${hostname}", ${setResult?.dnsrecords?.length ?? 0} total records in zone)`);
+                const createdCount =
+                    setResult?.dnsrecords?.filter((r: DnsRecord) => r.type === 'TXT' && r.hostname === hostname)
+                        .length ?? 0;
+                log.debug(
+                    `[acme-dns-01-netcup] set: updateDnsRecords OK (${createdCount} TXT record(s) for "${hostname}", ${setResult?.dnsrecords?.length ?? 0} total records in zone)`,
+                );
             } finally {
                 await logout(customerNumber, apiKey, apisessionid!);
             }
@@ -241,7 +248,9 @@ export function create(options: NetcupOptions): {
             // override in main.ts, which runs immediately after set() returns (propagationDelay=0).
             // This ensures the LE challenge POST happens the instant the record is confirmed,
             // avoiding any window in which the authorization could be marked invalid by LE.
-            log.debug(`[acme-dns-01-netcup] set: TXT record created for "${dnsHost}"; propagation check delegated to acme.dns01 override`);
+            log.debug(
+                `[acme-dns-01-netcup] set: TXT record created for "${dnsHost}"; propagation check delegated to acme.dns01 override`,
+            );
             return null;
         },
 
@@ -261,7 +270,7 @@ export function create(options: NetcupOptions): {
         },
 
         async remove(data: ChallengeData): Promise<null> {
-            const { dnsHost, dnsAuthorization } = data.challenge;
+            const { dnsHost } = data.challenge;
             log.debug(`[acme-dns-01-netcup] remove: dnsHost="${dnsHost}"`);
 
             const apisessionid = await login(customerNumber, apiKey, apiPassword);
@@ -290,11 +299,15 @@ export function create(options: NetcupOptions): {
                     .map(r => ({ ...r, deleterecord: true }));
 
                 if (toDelete.length === 0) {
-                    log.debug(`[acme-dns-01-netcup] remove: no TXT records found for hostname="${hostname}" in zone="${rootDomain}"`);
+                    log.debug(
+                        `[acme-dns-01-netcup] remove: no TXT records found for hostname="${hostname}" in zone="${rootDomain}"`,
+                    );
                     return null;
                 }
                 if (toDelete.length > 1) {
-                    log.info(`[acme-dns-01-netcup] remove: deleting ${toDelete.length} TXT records for hostname="${hostname}" (including stale records from previous runs)`);
+                    log.info(
+                        `[acme-dns-01-netcup] remove: deleting ${toDelete.length} TXT records for hostname="${hostname}" (including stale records from previous runs)`,
+                    );
                 }
 
                 await apiCall('updateDnsRecords', {

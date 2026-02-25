@@ -28,6 +28,7 @@ const noopLogger = {
 };
 /**
  * Send a JSON request to the Netcup CCP API.
+ *
  * @param throwOnError - if false, returns the raw response even on non-2xxx status (used by get/remove)
  */
 async function apiCall(action, param, throwOnError = true) {
@@ -127,8 +128,8 @@ function create(options) {
     }
     log.debug(`[acme-dns-01-netcup] create() called, customerNumber="${customerNumber}"`);
     return {
-        async init() {
-            return null;
+        init() {
+            return Promise.resolve(null);
         },
         async set(data) {
             const { dnsHost, dnsAuthorization } = data.challenge;
@@ -163,7 +164,8 @@ function create(options) {
                         ],
                     },
                 });
-                const createdCount = setResult?.dnsrecords?.filter((r) => r.type === 'TXT' && r.hostname === hostname).length ?? 0;
+                const createdCount = setResult?.dnsrecords?.filter((r) => r.type === 'TXT' && r.hostname === hostname)
+                    .length ?? 0;
                 log.debug(`[acme-dns-01-netcup] set: updateDnsRecords OK (${createdCount} TXT record(s) for "${hostname}", ${setResult?.dnsrecords?.length ?? 0} total records in zone)`);
             }
             finally {
@@ -192,7 +194,7 @@ function create(options) {
             }
         },
         async remove(data) {
-            const { dnsHost, dnsAuthorization } = data.challenge;
+            const { dnsHost } = data.challenge;
             log.debug(`[acme-dns-01-netcup] remove: dnsHost="${dnsHost}"`);
             const apisessionid = await login(customerNumber, apiKey, apiPassword);
             try {

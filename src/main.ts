@@ -83,6 +83,31 @@ class AcmeAdapter extends utils.Adapter {
         this.donePortCheck = false;
 
         this.on('ready', this.onReady.bind(this));
+        this.on('unload', this.onUnload.bind(this));
+    }
+
+    /**
+     * Called when the adapter is unloaded (e.g. ioBroker restart, adapter stop).
+     * Cleans up challenge servers and restores previously stopped adapters.
+     */
+    private onUnload(callback: () => void): void {
+        try {
+            for (const challenge of this.toShutdown) {
+                try {
+                    challenge.shutdown();
+                } catch {
+                    // ignore individual shutdown errors
+                }
+            }
+            // Best-effort restore of stopped adapters — fire and forget since we're shutting down
+            if (this.stoppedAdapters) {
+                this.restoreAdaptersOnSamePort().catch(() => {});
+            }
+        } catch {
+            // ignore
+        } finally {
+            callback();
+        }
     }
 
     /**
@@ -92,7 +117,11 @@ class AcmeAdapter extends utils.Adapter {
         // Log config without sensitive fields
         const safeConfig = { ...this.config } as Record<string, unknown>;
         for (const key of Object.keys(safeConfig)) {
-            if (/api|key|secret|password|token/i.test(key) && typeof safeConfig[key] === 'string' && (safeConfig[key] as string).length > 0) {
+            if (
+                /api|key|secret|password|token/i.test(key) &&
+                typeof safeConfig[key] === 'string' &&
+                safeConfig[key].length > 0
+            ) {
                 safeConfig[key] = '***';
             }
         }
@@ -196,7 +225,11 @@ class AcmeAdapter extends utils.Adapter {
             // Log options without exposing credentials
             const safeOpts = { ...dns01Options } as Record<string, unknown>;
             for (const key of Object.keys(safeOpts)) {
-                if (/api|key|secret|password|token/i.test(key) && typeof safeOpts[key] === 'string' && (safeOpts[key] as string).length > 0) {
+                if (
+                    /api|key|secret|password|token/i.test(key) &&
+                    typeof safeOpts[key] === 'string' &&
+                    safeOpts[key].length > 0
+                ) {
                     safeOpts[key] = '***';
                 }
             }
@@ -235,7 +268,9 @@ class AcmeAdapter extends utils.Adapter {
                 // which could race against DNS cache expiry on 1.1.1.1.
                 if (this.config.dns01Module === 'acme-dns-01-netcup') {
                     (thisChallenge as any).propagationDelay = 0;
-                    this.log.debug('dns-01: propagationDelay set to 0 for Netcup (set() handles propagation internally)');
+                    this.log.debug(
+                        'dns-01: propagationDelay set to 0 for Netcup (set() handles propagation internally)',
+                    );
                 }
                 this.challenges['dns-01'] = thisChallenge;
             }
@@ -243,8 +278,133 @@ class AcmeAdapter extends utils.Adapter {
     }
 
     acmeNotify(ev: string, msg: unknown): void {
-        const logLevel = ev === 'error' ? this.log.error : ev === 'warning' ? this.log.warn : this.log.debug;
-        logLevel(`ACMENotify - ${ev}: ${JSON.stringify(msg)}`);
+        let text: string;
+        try {
+            text = JSON.stringify(msg);
+        } catch {
+            text = String(msg);
+        }
+        if (ev === 'error') {
+            this.log.error(`ACMENotify - ${ev}: ${text}`);
+        } else if (ev === 'warning') {
+            this.log.warn(`ACMENotify - ${ev}: ${text}`);
+        } else {
+            this.log.debug(`ACMENotify - ${ev}: ${text}`);
+        }
+    }
+
+    /**
+     * Polls authoritative nameservers and then public resolvers until the expected
+     * TXT record is visible, ensuring the ACME challenge succeeds on first attempt.
+     */
+    private async pollDns01Challenge(ch: {
+        dnsHost: string;
+        dnsAuthorization: string;
+    }): Promise<{ answer: { data: string[] }[] }> {
+        const labels = ch.dnsHost.split('.');
+        const zone = labels.slice(-2).join('.');
+
+        // Build a resolver pointing at the zone's authoritative NS
+        let resolver: Resolver;
+        try {
+            const nsNames = await publicResolver.resolveNs(zone);
+            const nsIps: string[] = [];
+            for (const ns of nsNames.slice(0, 3)) {
+                try {
+                    const addrs = await publicResolver.resolve4(ns);
+                    nsIps.push(...addrs.map((ip: string) => `${ip}:53`));
+                } catch {
+                    /* skip */
+                }
+            }
+            if (nsIps.length > 0) {
+                resolver = new Resolver();
+                resolver.setServers(nsIps);
+                this.log.debug(`acme.dns01: using authoritative NS for ${zone}: ${nsIps.join(', ')}`);
+            } else {
+                resolver = publicResolver;
+                this.log.debug(`acme.dns01: NS lookup empty, falling back to public resolvers`);
+            }
+        } catch {
+            resolver = publicResolver;
+            this.log.debug(`acme.dns01: NS lookup failed, falling back to public resolvers`);
+        }
+
+        // Poll until the TXT record is visible on the authoritative NS.
+        // Netcup zone updates take ~5-10 min due to a serialised update queue.
+        // Two consecutive updates (dry-run remove + real set) can take ~10-20 min.
+        const maxAttempts = 120; // 120 × 10 s = 20 min
+        const retryDelayMs = 10_000;
+        this.log.info(
+            `acme.dns01: polling authoritative NS for ${ch.dnsHost} ` +
+                `(every ${retryDelayMs / 1000}s, max ${maxAttempts} attempts = ${(maxAttempts * retryDelayMs) / 60_000} min)...`,
+        );
+
+        const expectedValue = ch.dnsAuthorization;
+        this.log.debug(`acme.dns01: waiting for TXT value: ${expectedValue}`);
+
+        let foundRecords: string[][] = [];
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                const records = await resolver.resolveTxt(ch.dnsHost);
+                if (records.flat().includes(expectedValue)) {
+                    this.log.debug(
+                        `acme.dns01: correct TXT value found on authoritative NS after attempt ${attempt}/${maxAttempts}`,
+                    );
+                    foundRecords = records;
+                    break;
+                }
+                this.log.debug(
+                    `acme.dns01: attempt ${attempt}/${maxAttempts}: ${
+                        records.length > 0
+                            ? `found ${records.length} stale TXT record(s) but not the expected value`
+                            : 'no TXT records yet'
+                    }, retrying in ${retryDelayMs / 1000}s...`,
+                );
+            } catch {
+                this.log.debug(
+                    `acme.dns01: attempt ${attempt}/${maxAttempts}: NXDOMAIN — not yet visible, retrying in ${retryDelayMs / 1000}s...`,
+                );
+            }
+            await new Promise<void>(r => setTimeout(r, retryDelayMs));
+        }
+
+        if (foundRecords.length === 0) {
+            throw new Error(`acme.dns01: TXT record not visible on authoritative NS after ${maxAttempts} attempts`);
+        }
+
+        // Additionally wait until the correct value is also visible on public resolvers
+        // (1.1.1.1 / 8.8.8.8), because LE's validators use recursive resolvers that
+        // may have cached a negative (NXDOMAIN) response from earlier attempts.
+        const maxPublicAttempts = 60; // 60 × 10 s = 10 min extra
+        this.log.info(`acme.dns01: ${ch.dnsHost} visible on authoritative NS — waiting for public resolvers...`);
+        for (let attempt = 1; attempt <= maxPublicAttempts; attempt++) {
+            try {
+                const records = await publicResolver.resolveTxt(ch.dnsHost);
+                if (records.flat().includes(expectedValue)) {
+                    this.log.info(
+                        `acme.dns01: correct TXT value confirmed on public resolver after ${attempt}/${maxPublicAttempts} — submitting challenge to LE`,
+                    );
+                    return { answer: records.map((rr: string[]) => ({ data: rr })) };
+                }
+                this.log.debug(
+                    `acme.dns01: public resolver attempt ${attempt}/${maxPublicAttempts}: ${
+                        records.length > 0 ? 'found stale records but not the expected value' : 'no records yet'
+                    }, retrying in ${retryDelayMs / 1000}s...`,
+                );
+            } catch {
+                this.log.debug(
+                    `acme.dns01: public resolver attempt ${attempt}/${maxPublicAttempts}: NXDOMAIN, retrying in ${retryDelayMs / 1000}s...`,
+                );
+            }
+            await new Promise<void>(r => setTimeout(r, retryDelayMs));
+        }
+
+        // Public resolver didn't pick it up — submit anyway with authoritative NS result
+        this.log.warn(
+            `acme.dns01: public resolver timeout — submitting with authoritative NS result (may still succeed)`,
+        );
+        return { answer: foundRecords.map((rr: string[]) => ({ data: rr })) };
     }
 
     async initAcme(): Promise<void> {
@@ -268,107 +428,11 @@ class AcmeAdapter extends utils.Adapter {
             // This function then polls the authoritative NS directly until the record
             // is visible — and only then returns, so that acme.js immediately POSTs
             // the challenge to LE while the authorization is still fresh/pending.
-            (this.acme as any).dns01 = async (ch: { dnsHost: string; dnsAuthorization: string }) => {
-                const labels = ch.dnsHost.split('.');
-                const zone = labels.slice(-2).join('.');
-
-                // Build a resolver pointing at the zone's authoritative NS
-                let resolver: Resolver;
-                try {
-                    const nsNames = await publicResolver.resolveNs(zone);
-                    const nsIps: string[] = [];
-                    for (const ns of nsNames.slice(0, 3)) {
-                        try {
-                            const addrs = await publicResolver.resolve4(ns);
-                            nsIps.push(...addrs.map((ip: string) => `${ip}:53`));
-                        } catch { /* skip */ }
-                    }
-                    if (nsIps.length > 0) {
-                        resolver = new Resolver();
-                        resolver.setServers(nsIps);
-                        this.log.debug(`acme.dns01: using authoritative NS for ${zone}: ${nsIps.join(', ')}`);
-                    } else {
-                        resolver = publicResolver;
-                        this.log.debug(`acme.dns01: NS lookup empty, falling back to public resolvers`);
-                    }
-                } catch {
-                    resolver = publicResolver;
-                    this.log.debug(`acme.dns01: NS lookup failed, falling back to public resolvers`);
-                }
-
-                // Poll until the TXT record is visible on the authoritative NS.
-                // Netcup zone updates take ~5-10 min due to a serialised update queue.
-                // Two consecutive updates (dry-run remove + real set) can take ~10-20 min.
-                const maxAttempts = 120; // 120 × 10 s = 20 min
-                const retryDelayMs = 10_000;
-                this.log.info(
-                    `acme.dns01: polling authoritative NS for ${ch.dnsHost} ` +
-                    `(every ${retryDelayMs / 1000}s, max ${maxAttempts} attempts = ${maxAttempts * retryDelayMs / 60_000} min)...`,
-                );
-
-                // The expected value for this specific challenge attempt
-                const expectedValue = ch.dnsAuthorization;
-                this.log.debug(`acme.dns01: waiting for TXT value: ${expectedValue}`);
-
-                let foundRecords: string[][] = [];
-                for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-                    try {
-                        const records = await resolver.resolveTxt(ch.dnsHost);
-                        // Must find the specific expected value — not just any stale TXT record
-                        if (records.flat().includes(expectedValue)) {
-                            this.log.debug(`acme.dns01: correct TXT value found on authoritative NS after attempt ${attempt}/${maxAttempts}`);
-                            foundRecords = records;
-                            break;
-                        }
-                        this.log.debug(
-                            `acme.dns01: attempt ${attempt}/${maxAttempts}: ` +
-                            (records.length > 0
-                                ? `found ${records.length} stale TXT record(s) but not the expected value`
-                                : 'no TXT records yet') +
-                            `, retrying in ${retryDelayMs / 1000}s...`,
-                        );
-                    } catch {
-                        this.log.debug(`acme.dns01: attempt ${attempt}/${maxAttempts}: NXDOMAIN — not yet visible, retrying in ${retryDelayMs / 1000}s...`);
-                    }
-                    await new Promise<void>(r => setTimeout(r, retryDelayMs));
-                }
-
-                if (foundRecords.length === 0) {
-                    throw new Error(`acme.dns01: TXT record not visible on authoritative NS after ${maxAttempts} attempts`);
-                }
-
-                // Additionally wait until the correct value is also visible on public resolvers
-                // (1.1.1.1 / 8.8.8.8), because LE's validators use recursive resolvers that
-                // may have cached a negative (NXDOMAIN) response from earlier attempts.
-                // Only submitting the challenge once public resolvers see the record too
-                // prevents LE from instantly failing the validation with a cached miss.
-                const maxPublicAttempts = 60; // 60 × 10 s = 10 min extra
-                this.log.info(`acme.dns01: ${ch.dnsHost} visible on authoritative NS — waiting for public resolvers...`);
-                for (let attempt = 1; attempt <= maxPublicAttempts; attempt++) {
-                    try {
-                        const records = await publicResolver.resolveTxt(ch.dnsHost);
-                        if (records.flat().includes(expectedValue)) {
-                            this.log.info(`acme.dns01: correct TXT value confirmed on public resolver after ${attempt}/${maxPublicAttempts} — submitting challenge to LE`);
-                            return { answer: records.map((rr: string[]) => ({ data: rr })) };
-                        }
-                        this.log.debug(
-                            `acme.dns01: public resolver attempt ${attempt}/${maxPublicAttempts}: ` +
-                            (records.length > 0
-                                ? 'found stale records but not the expected value'
-                                : 'no records yet') +
-                            `, retrying in ${retryDelayMs / 1000}s...`,
-                        );
-                    } catch {
-                        this.log.debug(`acme.dns01: public resolver attempt ${attempt}/${maxPublicAttempts}: NXDOMAIN, retrying in ${retryDelayMs / 1000}s...`);
-                    }
-                    await new Promise<void>(r => setTimeout(r, retryDelayMs));
-                }
-
-                // Public resolver didn't pick it up — submit anyway with authoritative NS result
-                this.log.warn(`acme.dns01: public resolver timeout — submitting with authoritative NS result (may still succeed)`);
-                return { answer: foundRecords.map((rr: string[]) => ({ data: rr })) };
-            };
-            this.log.debug('acme.dns01 overridden: polls authoritative NS until record is visible, then immediately submits to LE');
+            (this.acme as any).dns01 = (ch: { dnsHost: string; dnsAuthorization: string }) =>
+                this.pollDns01Challenge(ch);
+            this.log.debug(
+                'acme.dns01 overridden: polls authoritative NS until record is visible, then immediately submits to LE',
+            );
 
             // Try and load a saved object
             const accountObject = await this.getObjectAsync(accountObjectId);
@@ -407,7 +471,11 @@ class AcmeAdapter extends utils.Adapter {
                 this.log.debug(`Created ACME account (kid: ${this.account.full?.key?.kid ?? 'unknown'})`);
 
                 await this.extendObjectAsync(accountObjectId, {
-                    native: { ...this.account, maintainerEmail: this.config.maintainerEmail, useStaging: this.config.useStaging },
+                    native: {
+                        ...this.account,
+                        maintainerEmail: this.config.maintainerEmail,
+                        useStaging: this.config.useStaging,
+                    },
                 });
             }
         }
@@ -504,24 +572,22 @@ class AcmeAdapter extends utils.Adapter {
         }
     }
 
-    // TODO: this belongs in some util class or whatever
+    /**
+     * Checks whether two string arrays contain the same elements (order-independent).
+     */
     _arraysMatch(arr1: unknown, arr2: unknown): boolean {
         if (!Array.isArray(arr1) || !Array.isArray(arr2)) {
-            // How can they be matching arrays if not even arrays?
             return false;
         }
-
         if (arr1 === arr2) {
-            // Some dummy passed in the same objects so of course they are the same!
             return true;
         }
-
         if (arr1.length !== arr2.length) {
-            // Cannot be the same if the length doesn't match.
             return false;
         }
-
-        return arr1.every(key => arr2.includes(key));
+        const sorted1 = [...arr1].sort();
+        const sorted2 = [...arr2].sort();
+        return sorted1.every((val, idx) => val === sorted2[idx]);
     }
 
     async generateCollection(collection: { id: string; commonName: string; altNames: string }): Promise<void> {
@@ -552,7 +618,9 @@ class AcmeAdapter extends utils.Adapter {
             this.log.info(`Collection ${collection.id} does not exist - will create`);
             create = true;
         } else {
-            this.log.debug(`Existing collection "${collection.id}": domains=${JSON.stringify(existingCollection.domains)}, staging=${existingCollection.staging}, expires=${existingCollection.tsExpires ? new Date(existingCollection.tsExpires).toISOString() : 'unknown'}`);
+            this.log.debug(
+                `Existing collection "${collection.id}": domains=${JSON.stringify(existingCollection.domains)}, staging=${existingCollection.staging}, expires=${existingCollection.tsExpires ? new Date(existingCollection.tsExpires).toISOString() : 'unknown'}`,
+            );
 
             try {
                 // Decode certificate to check not due for renewal and parts match what is configured.
@@ -563,10 +631,14 @@ class AcmeAdapter extends utils.Adapter {
                     this.log.info(`Collection ${collection.id} expiring soon (notAfter: ${crt.notAfter}) - will renew`);
                     create = true;
                 } else if (collection.commonName !== crt.subject.commonName) {
-                    this.log.info(`Collection ${collection.id} common name changed ("${crt.subject.commonName}" → "${collection.commonName}") - will renew`);
+                    this.log.info(
+                        `Collection ${collection.id} common name changed ("${crt.subject.commonName}" → "${collection.commonName}") - will renew`,
+                    );
                     create = true;
                 } else if (!this._arraysMatch(domains, crt.altNames)) {
-                    this.log.info(`Collection ${collection.id} alt names changed (${JSON.stringify(crt.altNames)} → ${JSON.stringify(domains)}) - will renew`);
+                    this.log.info(
+                        `Collection ${collection.id} alt names changed (${JSON.stringify(crt.altNames)} → ${JSON.stringify(domains)}) - will renew`,
+                    );
                     create = true;
                 } else if (this.config.useStaging !== existingCollection.staging) {
                     this.log.info(`Collection ${collection.id} staging flags do not match - will renew`);
@@ -640,10 +712,14 @@ class AcmeAdapter extends utils.Adapter {
                 }
 
                 if (collectionToSet) {
-                    this.log.debug(`${collection.id}: domains=${JSON.stringify(collectionToSet.domains)}, expires=${new Date(collectionToSet.tsExpires).toISOString()}`);
+                    this.log.debug(
+                        `${collection.id}: domains=${JSON.stringify(collectionToSet.domains)}, expires=${new Date(collectionToSet.tsExpires).toISOString()}`,
+                    );
                     // Save it
                     await this.certManager?.setCollection(collection.id, collectionToSet);
-                    this.log.info(`Collection ${collection.id} order success for ${domains.join(', ')} (expires ${new Date(collectionToSet.tsExpires).toISOString()})`);
+                    this.log.info(
+                        `Collection ${collection.id} order success for ${domains.join(', ')} (expires ${new Date(collectionToSet.tsExpires).toISOString()})`,
+                    );
                 }
             }
         }
