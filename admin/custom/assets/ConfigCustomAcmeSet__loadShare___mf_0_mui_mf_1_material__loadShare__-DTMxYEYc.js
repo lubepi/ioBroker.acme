@@ -1,1 +1,0 @@
-import{C as _,i as t}from"./ConfigCustomAcmeSet__mf_v__runtimeInit__mf_v__-D3_0Inpw.js";const{loadShare:o}=t,{initPromise:i}=_,r=i.then(e=>o("@mui/material",{customShareInfo:{shareConfig:{singleton:!0,strictVersion:!1,requiredVersion:"*"}}})),a=await r.then(e=>e());var n=a;export{n as C};
