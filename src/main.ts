@@ -11,17 +11,12 @@ import Keypairs from '@root/keypairs';
 import CSR from '@root/csr';
 import PEM from '@root/pem';
 import x509 from 'x509.js';
-import { Resolver } from 'node:dns/promises';
 
 import type { AdapterOptions } from '@iobroker/adapter-core';
 
 import pkg from '../package.json';
 import { create as createHttp01ChallengeServer } from './lib/http-01-challenge-server';
 import type { AcmeAdapterConfig } from './types';
-
-// Public DNS resolvers used as fallback when authoritative NS lookup fails.
-const publicResolver = new Resolver();
-publicResolver.setServers(['1.1.1.1', '8.8.8.8']);
 
 const accountObjectId = 'account';
 // Renew 7 days before expiry
@@ -238,18 +233,12 @@ class AcmeAdapter extends utils.Adapter {
             // Do this inside try... catch as the module is configurable
             let thisChallenge: ChallengeHandler | undefined;
             try {
-                // Netcup is bundled locally; all other modules are npm packages
-                if (this.config.dns01Module === 'acme-dns-01-netcup') {
-                    const netcupModule = await import('./lib/acme-dns-01-netcup.js');
-                    thisChallenge = netcupModule.create({ ...(dns01Options as any), log: this.log });
+                // Dynamic import - module name comes from config
+                const dns01Module = await import(this.config.dns01Module);
+                if (dns01Module.default) {
+                    thisChallenge = dns01Module.default.create(dns01Options);
                 } else {
-                    // Dynamic import - module name comes from config
-                    const dns01Module = await import(this.config.dns01Module);
-                    if (dns01Module.default) {
-                        thisChallenge = dns01Module.default.create(dns01Options);
-                    } else {
-                        thisChallenge = dns01Module.create(dns01Options);
-                    }
+                    thisChallenge = dns01Module.create(dns01Options);
                 }
             } catch (err) {
                 this.log.error(`Failed to load dns-01 challenge module: ${err}`);
@@ -293,120 +282,6 @@ class AcmeAdapter extends utils.Adapter {
         }
     }
 
-    /**
-     * Polls authoritative nameservers and then public resolvers until the expected
-     * TXT record is visible, ensuring the ACME challenge succeeds on first attempt.
-     */
-    private async pollDns01Challenge(ch: {
-        dnsHost: string;
-        dnsAuthorization: string;
-    }): Promise<{ answer: { data: string[] }[] }> {
-        const labels = ch.dnsHost.split('.');
-        const zone = labels.slice(-2).join('.');
-
-        // Build a resolver pointing at the zone's authoritative NS
-        let resolver: Resolver;
-        try {
-            const nsNames = await publicResolver.resolveNs(zone);
-            const nsIps: string[] = [];
-            for (const ns of nsNames.slice(0, 3)) {
-                try {
-                    const addrs = await publicResolver.resolve4(ns);
-                    nsIps.push(...addrs.map((ip: string) => `${ip}:53`));
-                } catch {
-                    /* skip */
-                }
-            }
-            if (nsIps.length > 0) {
-                resolver = new Resolver();
-                resolver.setServers(nsIps);
-                this.log.debug(`acme.dns01: using authoritative NS for ${zone}: ${nsIps.join(', ')}`);
-            } else {
-                resolver = publicResolver;
-                this.log.debug(`acme.dns01: NS lookup empty, falling back to public resolvers`);
-            }
-        } catch {
-            resolver = publicResolver;
-            this.log.debug(`acme.dns01: NS lookup failed, falling back to public resolvers`);
-        }
-
-        // Poll until the TXT record is visible on the authoritative NS.
-        // Netcup zone updates take ~5-10 min due to a serialised update queue.
-        // Two consecutive updates (dry-run remove + real set) can take ~10-20 min.
-        const maxAttempts = 120; // 120 × 10 s = 20 min
-        const retryDelayMs = 10_000;
-        this.log.info(
-            `acme.dns01: polling authoritative NS for ${ch.dnsHost} ` +
-                `(every ${retryDelayMs / 1000}s, max ${maxAttempts} attempts = ${(maxAttempts * retryDelayMs) / 60_000} min)...`,
-        );
-
-        const expectedValue = ch.dnsAuthorization;
-        this.log.debug(`acme.dns01: waiting for TXT value: ${expectedValue}`);
-
-        let foundRecords: string[][] = [];
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            try {
-                const records = await resolver.resolveTxt(ch.dnsHost);
-                if (records.flat().includes(expectedValue)) {
-                    this.log.debug(
-                        `acme.dns01: correct TXT value found on authoritative NS after attempt ${attempt}/${maxAttempts}`,
-                    );
-                    foundRecords = records;
-                    break;
-                }
-                this.log.debug(
-                    `acme.dns01: attempt ${attempt}/${maxAttempts}: ${
-                        records.length > 0
-                            ? `found ${records.length} stale TXT record(s) but not the expected value`
-                            : 'no TXT records yet'
-                    }, retrying in ${retryDelayMs / 1000}s...`,
-                );
-            } catch {
-                this.log.debug(
-                    `acme.dns01: attempt ${attempt}/${maxAttempts}: NXDOMAIN — not yet visible, retrying in ${retryDelayMs / 1000}s...`,
-                );
-            }
-            await new Promise<void>(r => setTimeout(r, retryDelayMs));
-        }
-
-        if (foundRecords.length === 0) {
-            throw new Error(`acme.dns01: TXT record not visible on authoritative NS after ${maxAttempts} attempts`);
-        }
-
-        // Additionally wait until the correct value is also visible on public resolvers
-        // (1.1.1.1 / 8.8.8.8), because LE's validators use recursive resolvers that
-        // may have cached a negative (NXDOMAIN) response from earlier attempts.
-        const maxPublicAttempts = 60; // 60 × 10 s = 10 min extra
-        this.log.info(`acme.dns01: ${ch.dnsHost} visible on authoritative NS — waiting for public resolvers...`);
-        for (let attempt = 1; attempt <= maxPublicAttempts; attempt++) {
-            try {
-                const records = await publicResolver.resolveTxt(ch.dnsHost);
-                if (records.flat().includes(expectedValue)) {
-                    this.log.info(
-                        `acme.dns01: correct TXT value confirmed on public resolver after ${attempt}/${maxPublicAttempts} — submitting challenge to LE`,
-                    );
-                    return { answer: records.map((rr: string[]) => ({ data: rr })) };
-                }
-                this.log.debug(
-                    `acme.dns01: public resolver attempt ${attempt}/${maxPublicAttempts}: ${
-                        records.length > 0 ? 'found stale records but not the expected value' : 'no records yet'
-                    }, retrying in ${retryDelayMs / 1000}s...`,
-                );
-            } catch {
-                this.log.debug(
-                    `acme.dns01: public resolver attempt ${attempt}/${maxPublicAttempts}: NXDOMAIN, retrying in ${retryDelayMs / 1000}s...`,
-                );
-            }
-            await new Promise<void>(r => setTimeout(r, retryDelayMs));
-        }
-
-        // Public resolver didn't pick it up — submit anyway with authoritative NS result
-        this.log.warn(
-            `acme.dns01: public resolver timeout — submitting with authoritative NS result (may still succeed)`,
-        );
-        return { answer: foundRecords.map((rr: string[]) => ({ data: rr })) };
-    }
-
     async initAcme(): Promise<void> {
         if (!this.acme) {
             // Doesn't exist yet, actually do init
@@ -422,17 +297,6 @@ class AcmeAdapter extends utils.Adapter {
                 debug: true,
             });
             await this.acme!.init(directoryUrl);
-
-            // Override acme.js's internal DNS-01 Pre-Flight check.
-            // set() creates the record and returns immediately (propagationDelay=0).
-            // This function then polls the authoritative NS directly until the record
-            // is visible — and only then returns, so that acme.js immediately POSTs
-            // the challenge to LE while the authorization is still fresh/pending.
-            (this.acme as any).dns01 = (ch: { dnsHost: string; dnsAuthorization: string }) =>
-                this.pollDns01Challenge(ch);
-            this.log.debug(
-                'acme.dns01 overridden: polls authoritative NS until record is visible, then immediately submits to LE',
-            );
 
             // Try and load a saved object
             const accountObject = await this.getObjectAsync(accountObjectId);
