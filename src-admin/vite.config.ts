@@ -9,10 +9,10 @@ const config = {
     plugins: [
         federation({
             manifest: true,
-            name: 'ConfigCustomPingSet',
+            name: 'ConfigCustomAcmeSet',
             filename: 'customComponents.js',
             exposes: {
-                './Components': './src/Components.jsx',
+                './Components': './src/Components.tsx',
             },
             remotes: {},
             shared: moduleFederationShared(pack),

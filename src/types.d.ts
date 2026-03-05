@@ -73,13 +73,11 @@ export interface AcmeAdapterConfig {
     dns01Ousername: string;
     dns01OverifyPropagation: boolean;
     dns01PpropagationDelay: number;
-    collections: [
-        {
-            id: string;
-            commonName: string;
-            altNames: string;
-        },
-    ];
+    collections: Array<{
+        id: string;
+        commonName: string;
+        altNames: string;
+    }>;
 }
 
 // Augment the global ioBroker namespace so this.config is properly typed

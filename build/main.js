@@ -54,12 +54,18 @@ const accountObjectId = 'account';
 // Renew 7 days before expiry
 const renewWindow = 60 * 60 * 24 * 7 * 1000;
 class AcmeAdapter extends utils.Adapter {
+    account;
+    challenges;
+    toShutdown;
+    donePortCheck;
+    certManager;
+    acme = null;
+    stoppedAdapters;
     constructor(options = {}) {
         super({
             ...options,
             name: 'acme',
         });
-        this.acme = null;
         this.account = {
             full: null,
             key: null,
@@ -68,12 +74,48 @@ class AcmeAdapter extends utils.Adapter {
         this.toShutdown = [];
         this.donePortCheck = false;
         this.on('ready', this.onReady.bind(this));
+        this.on('unload', this.onUnload.bind(this));
+    }
+    /**
+     * Called when the adapter is unloaded (e.g. ioBroker restart, adapter stop).
+     * Cleans up challenge servers and restores previously stopped adapters.
+     */
+    onUnload(callback) {
+        try {
+            for (const challenge of this.toShutdown) {
+                try {
+                    challenge.shutdown();
+                }
+                catch {
+                    // ignore individual shutdown errors
+                }
+            }
+            // Best-effort restore of stopped adapters — fire and forget since we're shutting down
+            if (this.stoppedAdapters) {
+                this.restoreAdaptersOnSamePort().catch(() => { });
+            }
+        }
+        catch {
+            // ignore
+        }
+        finally {
+            callback();
+        }
     }
     /**
      * Is called when databases are connected and adapter received configuration.
      */
     async onReady() {
-        this.log.debug(`config: ${JSON.stringify(this.config)}`);
+        // Log config without sensitive fields
+        const safeConfig = { ...this.config };
+        for (const key of Object.keys(safeConfig)) {
+            if (/api|key|secret|password|token/i.test(key) &&
+                typeof safeConfig[key] === 'string' &&
+                safeConfig[key].length > 0) {
+                safeConfig[key] = '***';
+            }
+        }
+        this.log.debug(`config: ${JSON.stringify(safeConfig)}`);
         this.certManager = new webserver_1.CertificateManager({ adapter: this });
         if (!this.config?.collections?.length) {
             this.terminate('No collections configured - nothing to order');
@@ -163,13 +205,27 @@ class AcmeAdapter extends utils.Adapter {
                     dns01Options.baseUrl = 'https://api.namecheap.com/xml.response';
                     break;
             }
-            this.log.debug(`dns-01 options: ${JSON.stringify(dns01Options)}`);
+            // Log options without exposing credentials
+            const safeOpts = { ...dns01Options };
+            for (const key of Object.keys(safeOpts)) {
+                if (/api|key|secret|password|token/i.test(key) &&
+                    typeof safeOpts[key] === 'string' &&
+                    safeOpts[key].length > 0) {
+                    safeOpts[key] = '***';
+                }
+            }
+            this.log.debug(`dns-01 options: ${JSON.stringify(safeOpts)}`);
             // Do this inside try... catch as the module is configurable
             let thisChallenge;
             try {
                 // Dynamic import - module name comes from config
                 const dns01Module = await import(this.config.dns01Module);
-                thisChallenge = dns01Module.create(dns01Options);
+                if (dns01Module.default) {
+                    thisChallenge = dns01Module.default.create(dns01Options);
+                }
+                else {
+                    thisChallenge = dns01Module.create(dns01Options);
+                }
             }
             catch (err) {
                 this.log.error(`Failed to load dns-01 challenge module: ${err}`);
@@ -185,8 +241,22 @@ class AcmeAdapter extends utils.Adapter {
         }
     }
     acmeNotify(ev, msg) {
-        const logLevel = ev === 'error' ? this.log.error : ev === 'warning' ? this.log.warn : this.log.debug;
-        logLevel(`ACMENotify - ${ev}: ${JSON.stringify(msg)}`);
+        let text;
+        try {
+            text = JSON.stringify(msg);
+        }
+        catch {
+            text = String(msg);
+        }
+        if (ev === 'error') {
+            this.log.error(`ACMENotify - ${ev}: ${text}`);
+        }
+        else if (ev === 'warning') {
+            this.log.warn(`ACMENotify - ${ev}: ${text}`);
+        }
+        else {
+            this.log.debug(`ACMENotify - ${ev}: ${text}`);
+        }
     }
     async initAcme() {
         if (!this.acme) {
@@ -206,8 +276,14 @@ class AcmeAdapter extends utils.Adapter {
             const accountObject = await this.getObjectAsync(accountObjectId);
             if (accountObject) {
                 this.log.debug(`Loaded existing ACME account: ${JSON.stringify(accountObject)}`);
-                if (accountObject.native?.full?.contact[0] !== `mailto:${this.config.maintainerEmail}`) {
-                    this.log.warn('Saved account does not match maintainer email, will recreate.');
+                if (accountObject.native?.maintainerEmail !== this.config.maintainerEmail) {
+                    this.log.info('Saved account does not match maintainer email, will recreate.');
+                }
+                else if (accountObject.native?.useStaging === undefined) {
+                    this.log.info('Saved account is missing staging/production flag (old format), will recreate.');
+                }
+                else if (accountObject.native?.useStaging !== this.config.useStaging) {
+                    this.log.info(`Saved account was created for ${accountObject.native.useStaging ? 'staging' : 'production'} LE, but current config uses ${this.config.useStaging ? 'staging' : 'production'} — will recreate.`);
                 }
                 else {
                     this.account = accountObject.native;
@@ -220,16 +296,20 @@ class AcmeAdapter extends utils.Adapter {
                     kty: 'EC',
                     format: 'jwk',
                 });
-                this.log.debug(`accountKeypair: ${JSON.stringify(accountKeypair)}`);
+                this.log.debug('New account keypair generated');
                 this.account.key = accountKeypair.private;
                 this.account.full = await this.acme.accounts.create({
                     subscriberEmail: this.config.maintainerEmail,
                     agreeToTerms: true,
                     accountKey: this.account.key,
                 });
-                this.log.debug(`Created account: ${JSON.stringify(this.account)}`);
+                this.log.debug(`Created ACME account (kid: ${this.account.full?.key?.kid ?? 'unknown'})`);
                 await this.extendObjectAsync(accountObjectId, {
-                    native: this.account,
+                    native: {
+                        ...this.account,
+                        maintainerEmail: this.config.maintainerEmail,
+                        useStaging: this.config.useStaging,
+                    },
                 });
             }
         }
@@ -320,21 +400,22 @@ class AcmeAdapter extends utils.Adapter {
             this.donePortCheck = false;
         }
     }
-    // TODO: this belongs in some util class or whatever
+    /**
+     * Checks whether two string arrays contain the same elements (order-independent).
+     */
     _arraysMatch(arr1, arr2) {
         if (!Array.isArray(arr1) || !Array.isArray(arr2)) {
-            // How can they be matching arrays if not even arrays?
             return false;
         }
         if (arr1 === arr2) {
-            // Some dummy passed in the same objects so of course they are the same!
             return true;
         }
         if (arr1.length !== arr2.length) {
-            // Cannot be the same if the length doesn't match.
             return false;
         }
-        return arr1.every(key => arr2.includes(key));
+        const sorted1 = [...arr1].sort();
+        const sorted2 = [...arr2].sort();
+        return sorted1.every((val, idx) => val === sorted2[idx]);
     }
     async generateCollection(collection) {
         this.log.debug(`Collection: ${JSON.stringify(collection)}`);
@@ -358,21 +439,21 @@ class AcmeAdapter extends utils.Adapter {
             create = true;
         }
         else {
-            this.log.debug(`Existing: ${collection.id}: ${JSON.stringify(existingCollection)}`);
+            this.log.debug(`Existing collection "${collection.id}": domains=${JSON.stringify(existingCollection.domains)}, staging=${existingCollection.staging}, expires=${existingCollection.tsExpires ? new Date(existingCollection.tsExpires).toISOString() : 'unknown'}`);
             try {
                 // Decode certificate to check not due for renewal and parts match what is configured.
                 const crt = x509_js_1.default.parseCert(existingCollection.cert.toString());
                 this.log.debug(`Existing cert: ${JSON.stringify(crt)}`);
                 if (Date.now() > Date.parse(crt.notAfter) - renewWindow) {
-                    this.log.info(`Collection ${collection.id} expiring soon - will renew`);
+                    this.log.info(`Collection ${collection.id} expiring soon (notAfter: ${crt.notAfter}) - will renew`);
                     create = true;
                 }
                 else if (collection.commonName !== crt.subject.commonName) {
-                    this.log.info(`Collection ${collection.id} common name does not match - will renew`);
+                    this.log.info(`Collection ${collection.id} common name changed ("${crt.subject.commonName}" → "${collection.commonName}") - will renew`);
                     create = true;
                 }
                 else if (!this._arraysMatch(domains, crt.altNames)) {
-                    this.log.info(`Collection ${collection.id} alt names do not match - will renew`);
+                    this.log.info(`Collection ${collection.id} alt names changed (${JSON.stringify(crt.altNames)} → ${JSON.stringify(domains)}) - will renew`);
                     create = true;
                 }
                 else if (this.config.useStaging !== existingCollection.staging) {
@@ -443,10 +524,10 @@ class AcmeAdapter extends utils.Adapter {
                     collectionToSet = null;
                 }
                 if (collectionToSet) {
-                    this.log.debug(`${collection.id} is ${JSON.stringify(collectionToSet)}`);
+                    this.log.debug(`${collection.id}: domains=${JSON.stringify(collectionToSet.domains)}, expires=${new Date(collectionToSet.tsExpires).toISOString()}`);
                     // Save it
                     await this.certManager?.setCollection(collection.id, collectionToSet);
-                    this.log.info(`Collection ${collection.id} order success`);
+                    this.log.info(`Collection ${collection.id} order success for ${domains.join(', ')} (expires ${new Date(collectionToSet.tsExpires).toISOString()})`);
                 }
             }
         }

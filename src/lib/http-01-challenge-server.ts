@@ -67,14 +67,13 @@ const _init = (opts: Record<string, unknown>): Promise<null> => {
             resolve(null);
         } else {
             _createChallengeServer();
-            _challengeServer!.listen(_config!.port, _config!.address, (err?: Error) => {
-                if (err) {
-                    _config!.log.error(err as unknown as string);
-                    reject(err);
-                } else {
-                    _config!.log.info(`challengeServer listening on ${_config!.address} port ${_config!.port}`);
-                    resolve(null);
-                }
+            _challengeServer!.once('error', (err: Error) => {
+                _config!.log.error(`Challenge server error: ${err.message}`);
+                reject(err);
+            });
+            _challengeServer!.listen(_config!.port, _config!.address, () => {
+                _config!.log.info(`challengeServer listening on ${_config!.address} port ${_config!.port}`);
+                resolve(null);
             });
         }
     });
@@ -118,7 +117,11 @@ const _shutdown = (): void => {
     } else {
         _config!.log.info('Shutting down challengeServer');
         _challengeServer.close();
-        // Technically, one should free up _memdb here too
+        _challengeServer = null;
+        // Clean up any leftover challenge tokens
+        for (const key of Object.keys(_memdb)) {
+            delete _memdb[key];
+        }
     }
 };
 
