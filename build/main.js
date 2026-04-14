@@ -235,7 +235,9 @@ class AcmeAdapter extends utils.Adapter {
                     dns01Options.baseUrl = 'https://api.namecheap.com/xml.response';
                     break;
                 case 'acme-dns-01-netcup':
-                    // Netcup handles its own propagation verification internally.
+                    // Adapter-side propagation polling is authoritative-first.
+                    // Disable plugin-internal verification to avoid duplicated checks.
+                    dns01Options.verifyPropagation = false;
                     break;
             }
             // Log dns-01 options with sensitive values redacted
@@ -285,14 +287,12 @@ class AcmeAdapter extends utils.Adapter {
                 for (const [key, value] of Object.entries(dns01Props)) {
                     thisChallenge[key] = value;
                 }
-                // The Netcup set() method polls until the TXT record is confirmed
-                // on public DNS (1.1.1.1/8.8.8.8), so no additional propagation
-                // delay is needed. Forcing 0 prevents acme.js from waiting an
-                // extra propagationDelay ms before its Pre-Flight DNS check,
-                // which could race against DNS cache expiry on 1.1.1.1.
+                // Adapter-side propagation verification runs before notifying the CA.
+                // Keep propagationDelay at 0 to avoid extra ACME-client waiting.
                 if (this.config.dns01Module === 'acme-dns-01-netcup') {
                     thisChallenge.propagationDelay = 0;
-                    this.log.debug('dns-01: propagationDelay set to 0 for Netcup (set() handles propagation internally)');
+                    this.log.debug('dns-01: Netcup verifyPropagation disabled; adapter handles propagation checks');
+                    this.log.debug('dns-01: propagationDelay set to 0 for Netcup to avoid duplicate waiting');
                 }
                 // Some acme-dns-01-* modules expect init({ request }) to inject HTTP helper.
                 if (typeof thisChallenge.init === 'function') {
@@ -1070,7 +1070,7 @@ class AcmeAdapter extends utils.Adapter {
                                     this.log.info(`Waiting for DNS alias delegation of ${sourceDnsHost} to ${challengeDnsHost} before notifying the CA.`);
                                     await this.waitForDnsAliasDelegation(sourceDnsHost, challengeDnsHost);
                                 }
-                                this.log.info(`Waiting for DNS propagation of ${challengeDnsHost} on system/public resolvers before notifying the CA.`);
+                                this.log.info(`Waiting for DNS propagation of ${challengeDnsHost} on authoritative resolvers (with system fallback) before notifying the CA.`);
                                 await this.waitForDnsPropagation(challengeDnsHost, expectedDnsAuthorization);
                             }
                             else {
