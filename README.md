@@ -202,7 +202,7 @@ See [acme-client](https://www.npmjs.com/package/acme-client) for implementation 
 - (lubepi) Added `deSEC` DNS-01 provider support and updated DNS provider dependencies (including `acme-dns-01-netcup` update and `acme-dns-01-route53` removal).
 - (lubepi) Enforced adapter-side DNS-01 propagation checks before CA notification with authoritative-first resolver strategy and system fallback.
 - (lubepi) Updated `acme-dns-01-netcup` integration to align provider behavior with adapter-side propagation control.
-- (lubepi) Expanded integration tests for DNS alias utilities and safe purge behavior for expired, de-configured collections.
+- (lubepi) Expanded integration tests for DNS alias utilities, safe purge behavior for expired, de-configured collections, and HTTP-01 stop/restore regression coverage.
 - (lubepi) Added HTTP-01 admin option to allow temporary stopping of conflicting adapters on the challenge port.
 - (lubepi) HTTP-01 conflicting-adapter stop is disabled by default (explicit opt-in).
 - (lubepi) Added fail-fast HTTP-01 listener preflight for non-wildcard domains (clear bind/port conflict errors) and early wildcard guard: wildcard issuance is aborted with a warning when only HTTP-01 is enabled and DNS-01 is disabled.
