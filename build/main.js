@@ -631,6 +631,70 @@ class AcmeAdapter extends utils.Adapter {
     normalizeDnsName(name) {
         return name.trim().replace(/\.+$/, '').toLowerCase();
     }
+    isResolverUnreachableError(err) {
+        const code = err?.code;
+        return (typeof code === 'string' &&
+            ['ETIMEOUT', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH', 'ECONNREFUSED', 'ECONNRESET'].includes(code));
+    }
+    async resolveNsServerAddresses(nsHost) {
+        const addresses = new Set();
+        try {
+            const ipv4 = await node_dns_1.promises.resolve4(nsHost);
+            for (const ip of ipv4) {
+                addresses.add(ip);
+            }
+        }
+        catch (err) {
+            this.log.debug(`DNS A lookup failed for nameserver ${nsHost}: ${AcmeAdapter.getErrorMessage(err)}`);
+        }
+        try {
+            const ipv6 = await node_dns_1.promises.resolve6(nsHost);
+            for (const ip of ipv6) {
+                addresses.add(ip);
+            }
+        }
+        catch (err) {
+            this.log.debug(`DNS AAAA lookup failed for nameserver ${nsHost}: ${AcmeAdapter.getErrorMessage(err)}`);
+        }
+        return Array.from(addresses);
+    }
+    async getAuthoritativeResolvers(recordName) {
+        const normalizedName = this.normalizeDnsName(recordName);
+        const labels = normalizedName.split('.');
+        const nsHosts = new Set();
+        for (let i = 0; i < labels.length - 1; i += 1) {
+            const zoneCandidate = labels.slice(i).join('.');
+            try {
+                const nsRecords = await node_dns_1.promises.resolveNs(zoneCandidate);
+                if (nsRecords.length > 0) {
+                    for (const ns of nsRecords) {
+                        nsHosts.add(this.normalizeDnsName(ns));
+                    }
+                    break;
+                }
+            }
+            catch (err) {
+                this.log.debug(`DNS NS lookup failed for ${zoneCandidate}: ${AcmeAdapter.getErrorMessage(err)}`);
+            }
+        }
+        const authoritativeResolvers = [];
+        for (const nsHost of nsHosts) {
+            const addresses = await this.resolveNsServerAddresses(nsHost);
+            if (!addresses.length) {
+                this.log.debug(`No IP addresses resolved for nameserver ${nsHost}.`);
+                continue;
+            }
+            for (const address of addresses) {
+                const resolver = new node_dns_1.promises.Resolver();
+                resolver.setServers([address]);
+                authoritativeResolvers.push({
+                    name: `${nsHost} (${address})`,
+                    resolver,
+                });
+            }
+        }
+        return authoritativeResolvers;
+    }
     async resolveTxtViaResolver(resolver, recordName) {
         try {
             const cnameRecords = await resolver.resolveCname(recordName);
@@ -643,37 +707,84 @@ class AcmeAdapter extends utils.Adapter {
         }
         try {
             const txtRecords = await resolver.resolveTxt(recordName);
-            return txtRecords.flat().filter(entry => typeof entry === 'string');
+            return {
+                values: txtRecords.flat().filter(entry => typeof entry === 'string'),
+                reachable: true,
+            };
         }
         catch (err) {
             this.log.debug(`DNS TXT lookup failed for ${recordName}: ${AcmeAdapter.getErrorMessage(err)}`);
-            return [];
+            return {
+                values: [],
+                reachable: !this.isResolverUnreachableError(err),
+            };
+        }
+    }
+    async resolveCnameViaResolver(resolver, recordName) {
+        try {
+            const cnameRecords = await resolver.resolveCname(recordName);
+            return {
+                values: cnameRecords,
+                reachable: true,
+            };
+        }
+        catch (err) {
+            this.log.debug(`DNS CNAME lookup failed for ${recordName}: ${AcmeAdapter.getErrorMessage(err)}`);
+            return {
+                values: [],
+                reachable: !this.isResolverUnreachableError(err),
+            };
         }
     }
     async waitForDnsPropagation(recordName, expectedValue) {
         const waitForMs = 5000;
         const maxAttempts = 240;
-        const resolvers = [
-            { name: 'system resolver', resolver: new node_dns_1.promises.Resolver() },
-            { name: '1.1.1.1', resolver: new node_dns_1.promises.Resolver() },
-            { name: '8.8.8.8', resolver: new node_dns_1.promises.Resolver() },
-        ];
-        resolvers[1].resolver.setServers(['1.1.1.1']);
-        resolvers[2].resolver.setServers(['8.8.8.8']);
+        const systemResolver = new node_dns_1.promises.Resolver();
+        const authoritativeResolvers = await this.getAuthoritativeResolvers(recordName);
+        if (authoritativeResolvers.length > 0) {
+            this.log.debug(`Using authoritative DNS resolvers for propagation check of ${recordName}: ${authoritativeResolvers
+                .map(entry => entry.name)
+                .join(', ')}`);
+        }
+        else {
+            this.log.warn(`No authoritative DNS resolver could be determined for ${recordName}. Falling back to system resolver checks.`);
+        }
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-            const checks = await Promise.all(resolvers.map(async ({ name, resolver }) => {
-                const values = await this.resolveTxtViaResolver(resolver, recordName);
-                return {
-                    name,
-                    ok: values.includes(expectedValue),
-                };
-            }));
-            const okResolvers = checks.filter(check => check.ok).map(check => check.name);
-            if (okResolvers.length >= 2) {
-                this.log.info(`DNS propagation verified for ${recordName} on ${okResolvers.join(', ')} (quorum reached).`);
-                return;
+            if (authoritativeResolvers.length > 0) {
+                const checks = await Promise.all(authoritativeResolvers.map(async ({ name, resolver }) => {
+                    const result = await this.resolveTxtViaResolver(resolver, recordName);
+                    return {
+                        name,
+                        reachable: result.reachable,
+                        ok: result.values.includes(expectedValue),
+                    };
+                }));
+                const reachableChecks = checks.filter(check => check.reachable);
+                const okResolvers = reachableChecks.filter(check => check.ok).map(check => check.name);
+                if (reachableChecks.length > 0 && okResolvers.length === reachableChecks.length) {
+                    this.log.info(`DNS propagation verified for ${recordName} on all reachable authoritative resolvers (${okResolvers.join(', ')}).`);
+                    return;
+                }
+                if (reachableChecks.length > 0) {
+                    this.log.debug(`DNS propagation not yet complete for ${recordName} on authoritative resolvers. Visible on ${okResolvers.length}/${reachableChecks.length} reachable authoritative resolvers. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`);
+                }
+                else {
+                    const fallback = await this.resolveTxtViaResolver(systemResolver, recordName);
+                    if (fallback.values.includes(expectedValue)) {
+                        this.log.info(`DNS propagation verified for ${recordName} via system resolver fallback (authoritative resolvers not reachable).`);
+                        return;
+                    }
+                    this.log.debug(`Authoritative resolvers for ${recordName} were not reachable and system resolver fallback does not see TXT yet. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`);
+                }
             }
-            this.log.debug(`DNS propagation not yet complete for ${recordName}. Visible on: ${okResolvers.length ? okResolvers.join(', ') : 'none'}. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`);
+            else {
+                const fallback = await this.resolveTxtViaResolver(systemResolver, recordName);
+                if (fallback.values.includes(expectedValue)) {
+                    this.log.info(`DNS propagation verified for ${recordName} via system resolver.`);
+                    return;
+                }
+                this.log.debug(`DNS propagation not yet complete for ${recordName} via system resolver. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`);
+            }
             if (attempt < maxAttempts) {
                 await new Promise(resolve => setTimeout(resolve, waitForMs));
             }
@@ -684,35 +795,39 @@ class AcmeAdapter extends utils.Adapter {
         const waitForMs = 5000;
         const maxAttempts = 3;
         const normalizedTarget = this.normalizeDnsName(targetRecordName);
-        const resolvers = [
-            { name: 'system resolver', resolver: new node_dns_1.promises.Resolver() },
-            { name: '1.1.1.1', resolver: new node_dns_1.promises.Resolver() },
-            { name: '8.8.8.8', resolver: new node_dns_1.promises.Resolver() },
-        ];
-        resolvers[1].resolver.setServers(['1.1.1.1']);
-        resolvers[2].resolver.setServers(['8.8.8.8']);
+        const systemResolver = new node_dns_1.promises.Resolver();
+        const authoritativeResolvers = await this.getAuthoritativeResolvers(sourceRecordName);
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-            const checks = await Promise.all(resolvers.map(async ({ name, resolver }) => {
-                try {
-                    const cnameRecords = await resolver.resolveCname(sourceRecordName);
-                    const ok = cnameRecords.some(record => this.normalizeDnsName(record) === normalizedTarget);
+            if (authoritativeResolvers.length > 0) {
+                const checks = await Promise.all(authoritativeResolvers.map(async ({ name, resolver }) => {
+                    const result = await this.resolveCnameViaResolver(resolver, sourceRecordName);
+                    const ok = result.values.some(record => this.normalizeDnsName(record) === normalizedTarget);
                     return {
                         name,
+                        reachable: result.reachable,
                         ok,
                     };
+                }));
+                const reachableChecks = checks.filter(check => check.reachable);
+                const ready = reachableChecks.find(check => check.ok);
+                if (ready && reachableChecks.every(check => check.ok)) {
+                    this.log.info(`DNS alias delegation verified for ${sourceRecordName} -> ${targetRecordName} on all reachable authoritative resolvers.`);
+                    return;
                 }
-                catch (err) {
-                    this.log.debug(`DNS alias CNAME lookup failed for ${sourceRecordName} on ${name}: ${AcmeAdapter.getErrorMessage(err)}`);
-                    return {
-                        name,
-                        ok: false,
-                    };
+                if (reachableChecks.length === 0) {
+                    const fallback = await this.resolveCnameViaResolver(systemResolver, sourceRecordName);
+                    if (fallback.values.some(record => this.normalizeDnsName(record) === normalizedTarget)) {
+                        this.log.info(`DNS alias delegation verified for ${sourceRecordName} -> ${targetRecordName} via system resolver fallback (authoritative resolvers not reachable).`);
+                        return;
+                    }
                 }
-            }));
-            const ready = checks.find(check => check.ok);
-            if (ready) {
-                this.log.info(`DNS alias delegation verified for ${sourceRecordName} -> ${targetRecordName} on ${ready.name}.`);
-                return;
+            }
+            else {
+                const fallback = await this.resolveCnameViaResolver(systemResolver, sourceRecordName);
+                if (fallback.values.some(record => this.normalizeDnsName(record) === normalizedTarget)) {
+                    this.log.info(`DNS alias delegation verified for ${sourceRecordName} -> ${targetRecordName} via system resolver.`);
+                    return;
+                }
             }
             this.log.debug(`DNS alias delegation not yet visible for ${sourceRecordName} -> ${targetRecordName}. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`);
             if (attempt < maxAttempts) {
