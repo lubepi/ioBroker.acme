@@ -44,6 +44,7 @@ const webserver_1 = require("@iobroker/webserver");
 const acme = __importStar(require("acme-client"));
 const node_crypto_1 = __importDefault(require("node:crypto"));
 const node_dns_1 = require("node:dns");
+const node_net_1 = __importDefault(require("node:net"));
 const node_util_1 = require("node:util");
 const x509_js_1 = __importDefault(require("x509.js"));
 const dns_01_acmedns_1 = require("./lib/dns-01-acmedns");
@@ -52,6 +53,10 @@ const dns_01_utils_1 = require("./lib/dns-01-utils");
 const accountObjectId = 'account';
 // Renew 7 days before expiry
 const renewWindow = 60 * 60 * 24 * 7 * 1000;
+const adapterStopWaitTimeoutMs = 20000;
+const adapterStopPollIntervalMs = 500;
+const portReleaseWaitTimeoutMs = 10000;
+const portReleasePollIntervalMs = 250;
 class AcmeAdapter extends utils.Adapter {
     account;
     challenges;
@@ -448,6 +453,57 @@ class AcmeAdapter extends utils.Adapter {
             this.http01ServerInitPromise = null;
         }
     }
+    async isHttp01PortAvailable() {
+        return await new Promise(resolve => {
+            const server = node_net_1.default.createServer();
+            const onResolved = (available) => {
+                server.removeAllListeners('error');
+                server.removeAllListeners('listening');
+                resolve(available);
+            };
+            server.once('error', () => {
+                try {
+                    server.close();
+                }
+                catch {
+                    // ignore close errors on failed bind attempts
+                }
+                onResolved(false);
+            });
+            server.once('listening', () => {
+                server.close(() => onResolved(true));
+            });
+            try {
+                server.listen(this.config.port, this.config.bind);
+            }
+            catch {
+                onResolved(false);
+            }
+        });
+    }
+    async waitForHttp01PortRelease(timeoutMs = portReleaseWaitTimeoutMs) {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            if (await this.isHttp01PortAvailable()) {
+                return true;
+            }
+            await new Promise(resolve => setTimeout(resolve, portReleasePollIntervalMs));
+        }
+        return await this.isHttp01PortAvailable();
+    }
+    async waitForAdapterStop(instanceId, timeoutMs = adapterStopWaitTimeoutMs) {
+        const stateId = `${instanceId}.alive`;
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            const state = await this.getForeignStateAsync(stateId);
+            if (state?.val !== true) {
+                return true;
+            }
+            await new Promise(resolve => setTimeout(resolve, adapterStopPollIntervalMs));
+        }
+        const finalState = await this.getForeignStateAsync(stateId);
+        return finalState?.val !== true;
+    }
     async stopAdaptersOnSamePort() {
         // TODO: Maybe this should be in some sort of utility so other adapters can 'grab' a port in use?
         // Stop conflicting adapters using our challenge server port only if we are going to need it and haven't already checked.
@@ -516,6 +572,16 @@ class AcmeAdapter extends utils.Adapter {
                         config.common.enabled = false;
                         await this.setForeignObjectAsync(config._id, config);
                     }
+                }
+                for (const adapterId of this.stoppedAdapters) {
+                    const stopped = await this.waitForAdapterStop(adapterId);
+                    if (!stopped) {
+                        this.log.warn(`Adapter ${adapterId} did not stop within ${adapterStopWaitTimeoutMs}ms. HTTP-01 port might still be in use.`);
+                    }
+                }
+                const portReleased = await this.waitForHttp01PortRelease();
+                if (!portReleased) {
+                    this.log.warn(`HTTP-01 port ${bind}:${port} still appears busy after waiting ${portReleaseWaitTimeoutMs}ms for conflicting adapters to stop.`);
                 }
             }
             this.donePortCheck = true;
