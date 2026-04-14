@@ -350,14 +350,22 @@ class AcmeAdapter extends utils.Adapter {
 
                 // Check if the saved account matches our current config
                 const native = accountObject.native as any;
+                const savedMaintainerEmail =
+                    typeof native?.maintainerEmail === 'string' ? native.maintainerEmail.trim() : '';
+                const configuredMaintainerEmail = `${this.config.maintainerEmail || ''}`.trim();
 
-                if (native?.maintainerEmail !== this.config.maintainerEmail) {
+                if (savedMaintainerEmail && savedMaintainerEmail !== configuredMaintainerEmail) {
                     this.log.warn('Saved account does not match maintainer email, will recreate.');
                 } else if (native?.useStaging !== this.config.useStaging) {
                     this.log.info(
                         `Saved account was created for ${native?.useStaging ? 'staging' : 'production'} LE, but current config uses ${this.config.useStaging ? 'staging' : 'production'} — will recreate.`,
                     );
                 } else {
+                    if (!savedMaintainerEmail && (native?.full || native?.keyEnc || native?.key)) {
+                        this.log.debug(
+                            'Saved account has no maintainerEmail metadata; reusing account and updating metadata.',
+                        );
+                    }
                     this.account = native as AcmeAccount;
                 }
             }
@@ -751,7 +759,9 @@ class AcmeAdapter extends utils.Adapter {
                 `DNS propagation not yet complete for ${recordName}. Visible on: ${okResolvers.length ? okResolvers.join(', ') : 'none'}. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`,
             );
 
-            await new Promise(resolve => setTimeout(resolve, waitForMs));
+            if (attempt < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, waitForMs));
+            }
         }
 
         throw new Error(`Timed out waiting for DNS propagation of ${recordName}`);
@@ -804,13 +814,14 @@ class AcmeAdapter extends utils.Adapter {
                 `DNS alias delegation not yet visible for ${sourceRecordName} -> ${targetRecordName}. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`,
             );
 
-            await new Promise(resolve => setTimeout(resolve, waitForMs));
+            if (attempt < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, waitForMs));
+            }
         }
 
         const message =
             `Alias delegation not visible: ${sourceRecordName} -> ${targetRecordName}. ` +
             'The CNAME entry is either missing or not yet visible on tested resolvers.';
-        this.log.warn(message);
         throw new Error(message);
     }
 
