@@ -63,6 +63,8 @@ class AcmeAdapter extends utils.Adapter {
     dnsChallengeCache;
     acmeDnsCnameCheckedHosts;
     acmeDnsAutoRegisterBlocked;
+    http01ServerReady;
+    http01ServerInitPromise;
     /**
      * Safely extract an error message from an unknown error value.
      */
@@ -87,6 +89,8 @@ class AcmeAdapter extends utils.Adapter {
         this.dnsChallengeCache = {};
         this.acmeDnsCnameCheckedHosts = new Set();
         this.acmeDnsAutoRegisterBlocked = false;
+        this.http01ServerReady = false;
+        this.http01ServerInitPromise = null;
         this.on('ready', this.onReady.bind(this));
         this.on('unload', this.onUnload.bind(this));
     }
@@ -104,6 +108,8 @@ class AcmeAdapter extends utils.Adapter {
                     delete this.dnsChallengeCache[key];
                 }
                 this.acmeDnsCnameCheckedHosts.clear();
+                this.http01ServerReady = false;
+                this.http01ServerInitPromise = null;
                 await this.restoreAdaptersOnSamePort();
             }
             catch (err) {
@@ -403,6 +409,33 @@ class AcmeAdapter extends utils.Adapter {
                     },
                 });
             }
+        }
+    }
+    async ensureHttp01ChallengeServerStarted() {
+        if (!this.config.http01Active) {
+            return;
+        }
+        if (this.http01ServerReady) {
+            return;
+        }
+        if (this.http01ServerInitPromise) {
+            await this.http01ServerInitPromise;
+            return;
+        }
+        const handler = this.challenges['http-01'];
+        if (!handler) {
+            throw new Error('HTTP-01 challenge handler is not initialized');
+        }
+        this.http01ServerInitPromise = (async () => {
+            await handler.init({});
+            this.http01ServerReady = true;
+            this.log.info(`HTTP-01 challenge server started on ${this.config.bind}:${this.config.port}`);
+        })();
+        try {
+            await this.http01ServerInitPromise;
+        }
+        finally {
+            this.http01ServerInitPromise = null;
         }
     }
     async stopAdaptersOnSamePort() {
@@ -1037,7 +1070,7 @@ class AcmeAdapter extends utils.Adapter {
                     }
                     const aliasDnsOnlyFlow = !!this.config.dns01Alias && this.config.dns01Active && !this.config.http01Active;
                     if (aliasDnsOnlyFlow) {
-                        this.log.info('DNS-01 alias configured in DNS-only mode: waiting for alias delegation and DNS propagation before continuing the ACME flow.');
+                        this.log.info('DNS-01 alias configured in DNS-only mode: waiting for CNAME delegation and DNS propagation before continuing the ACME flow.');
                     }
                     cert = (await this.acmeClient.auto({
                         csr,
@@ -1077,6 +1110,7 @@ class AcmeAdapter extends utils.Adapter {
                                 await this.waitForDnsPropagation(challengeDnsHost, expectedDnsAuthorization);
                             }
                             else {
+                                await this.ensureHttp01ChallengeServerStarted();
                                 const challengeData = {
                                     identifier: { ...authz.identifier },
                                     token: challenge.token,
