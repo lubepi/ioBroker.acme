@@ -718,35 +718,21 @@ class AcmeAdapter extends utils.Adapter {
 
     private async waitForDnsPropagation(recordName: string, expectedValue: string): Promise<void> {
         const waitForMs = 5000;
-        const maxAttempts = 36;
-        const resolvers: Array<{ name: string; resolver: dnsPromises.Resolver }> = [
-            { name: 'system resolver', resolver: new dnsPromises.Resolver() },
-            { name: '1.1.1.1', resolver: new dnsPromises.Resolver() },
-            { name: '8.8.8.8', resolver: new dnsPromises.Resolver() },
-        ];
-
-        resolvers[1].resolver.setServers(['1.1.1.1']);
-        resolvers[2].resolver.setServers(['8.8.8.8']);
+        const maxAttempts = 240;
+        const resolver = new dnsPromises.Resolver();
 
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-            const checks = await Promise.all(
-                resolvers.map(async ({ name, resolver }) => {
-                    const values = await this.resolveTxtViaResolver(resolver, recordName);
-                    return {
-                        name,
-                        ok: values.includes(expectedValue),
-                    };
-                }),
-            );
+            const values = await this.resolveTxtViaResolver(resolver, recordName);
 
-            if (checks.every(check => check.ok)) {
-                this.log.info(`DNS propagation verified for ${recordName} on system and public resolvers.`);
+            // acme-client performs local DNS pre-flight checks, therefore the
+            // system resolver must see the TXT record before we proceed.
+            if (values.includes(expectedValue)) {
+                this.log.info(`DNS propagation verified for ${recordName} on system resolver.`);
                 return;
             }
 
-            const pending = checks.filter(check => !check.ok).map(check => check.name);
             this.log.debug(
-                `DNS propagation not yet complete for ${recordName}. Pending: ${pending.join(', ')}. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`,
+                `DNS propagation not yet complete for ${recordName} on system resolver. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`,
             );
 
             await new Promise(resolve => setTimeout(resolve, waitForMs));
