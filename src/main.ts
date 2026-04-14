@@ -1216,7 +1216,7 @@ class AcmeAdapter extends utils.Adapter {
                         !!this.config.dns01Alias && this.config.dns01Active && !this.config.http01Active;
                     if (aliasDnsOnlyFlow) {
                         this.log.info(
-                            'DNS-01 alias configured in DNS-only mode: waiting for DNS propagation before continuing the ACME flow.',
+                            'DNS-01 alias configured in DNS-only mode: waiting for CNAME delegation and DNS propagation before continuing the ACME flow.',
                         );
                     }
 
@@ -1264,11 +1264,15 @@ class AcmeAdapter extends utils.Adapter {
                                             `Waiting for DNS alias delegation of ${sourceDnsHost} to ${challengeDnsHost} before notifying the CA.`,
                                         );
                                         await this.waitForDnsAliasDelegation(sourceDnsHost, challengeDnsHost);
+                                        this.log.info(
+                                            `Waiting for DNS propagation of ${challengeDnsHost} on authoritative resolvers (with system fallback) before notifying the CA.`,
+                                        );
+                                    } else {
+                                        this.log.info(
+                                            `DNS-01 without alias: waiting for DNS propagation of ${challengeDnsHost} on authoritative resolvers (with system fallback) before notifying the CA.`,
+                                        );
                                     }
 
-                                    this.log.info(
-                                        `Waiting for DNS propagation of ${challengeDnsHost} on authoritative resolvers (with system fallback) before notifying the CA.`,
-                                    );
                                     await this.waitForDnsPropagation(challengeDnsHost, expectedDnsAuthorization);
                                 } else {
                                     const challengeData: any = {
