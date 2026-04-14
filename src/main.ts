@@ -79,6 +79,70 @@ class AcmeAdapter extends utils.Adapter {
         return String(err);
     }
 
+    /**
+     * Adds user-facing context for common opaque runtime errors.
+     */
+    private getActionableCertificateErrorMessage(err: unknown): string {
+        const errorMessage = AcmeAdapter.getErrorMessage(err);
+        const hasNonWildcardHttp01Targets =
+            this.config.http01Active &&
+            this.config.collections.some(collection => {
+                const domains = [collection.commonName, collection.altNames || '']
+                    .join(',')
+                    .split(',')
+                    .map(domain => domain.trim())
+                    .filter(domain => !!domain);
+                return domains.some(domain => !domain.startsWith('*.'));
+            });
+
+        const http01RoutingHint = hasNonWildcardHttp01Targets
+            ? ` HTTP-01 routing hint: The CA always validates over public port 80. If ACME listens on ${this.config.bind}:${this.config.port}, ensure your router/reverse proxy forwards /.well-known/acme-challenge/ from external port 80 to this configured ACME endpoint.`
+            : '';
+
+        const appendHint = (message: string, hint: string): string => {
+            if (!hint) {
+                return message;
+            }
+            const normalizedMessage = message.trimEnd().replace(/[.\s]+$/, '');
+            return `${normalizedMessage}.${hint}`;
+        };
+
+        const stack = err instanceof Error ? err.stack || '' : '';
+        const transportOrNetworkError =
+            /(timed?\s*out|timeout|econnreset|econnrefused|econnaborted|enotfound|eai_again|etimedout|ehostunreach|enetunreach|socket hang up|fetch failed|network error|connection reset|tls|ssl)/i.test(
+                errorMessage,
+            ) || /acme-client\/src\/axios\.js/.test(stack);
+        const routingHintForError = transportOrNetworkError ? http01RoutingHint : '';
+        const acmeClientTransportBug =
+            /Cannot read properties of undefined \(reading 'config'\)/.test(errorMessage) &&
+            /acme-client\/src\/axios\.js/.test(stack);
+
+        if (acmeClientTransportBug) {
+            const transportHint =
+                ' ACME transport error: no valid HTTP response was available from the ACME API (often timeout/connection reset/proxy or DNS/network interruption).';
+            return appendHint(errorMessage + transportHint, routingHintForError);
+        }
+
+        if (/Cannot read properties of undefined \(reading 'config'\)/.test(errorMessage)) {
+            const activeChallenges: string[] = [];
+            if (this.config.http01Active) {
+                activeChallenges.push('HTTP-01');
+            }
+            if (this.config.dns01Active) {
+                activeChallenges.push(`DNS-01 (${this.config.dns01Module || 'module not set'})`);
+            }
+
+            const activeChallengeInfo = activeChallenges.length > 0 ? activeChallenges.join(', ') : 'none configured';
+
+            return appendHint(
+                `${errorMessage}. Active challenge setup: ${activeChallengeInfo}. This can be caused by provider module/runtime issues, but also by transport/network timeouts. Verify DNS-01 module selection/credentials and connectivity to the ACME API.`,
+                routingHintForError,
+            );
+        }
+
+        return appendHint(errorMessage, routingHintForError);
+    }
+
     constructor(options: Partial<utils.AdapterOptions> = {}) {
         super({
             ...options,
@@ -1501,13 +1565,17 @@ class AcmeAdapter extends utils.Adapter {
                 this.log.info(`Collection ${collection.id} order success`);
             } catch (err) {
                 const errorMessage = AcmeAdapter.getErrorMessage(err);
+                const userFacingErrorMessage = this.getActionableCertificateErrorMessage(err);
+                if (err instanceof Error && err.stack) {
+                    this.log.debug(`Certificate request stack (${collection.id}): ${err.stack}`);
+                }
                 if (errorMessage.startsWith('Alias delegation not visible:')) {
                     this.log.warn(
-                        `Certificate request for ${collection.id} (${domains?.join(', ')}) aborted: ${errorMessage}`,
+                        `Certificate request for ${collection.id} (${domains?.join(', ')}) aborted: ${userFacingErrorMessage}`,
                     );
                 } else {
                     this.log.error(
-                        `Certificate request for ${collection.id} (${domains?.join(', ')}) failed: ${errorMessage}`,
+                        `Certificate request for ${collection.id} (${domains?.join(', ')}) failed: ${userFacingErrorMessage}`,
                     );
                 }
             } finally {

@@ -58,7 +58,8 @@ class Http01ChallengeServer implements ChallengeServer {
             const matches = req.url?.match(regexp);
             if (!matches || !Array.isArray(matches) || matches.length !== 2) {
                 res.statusCode = 400;
-                this.config.log.warn("Challenge server request doesn't look like ACME challenge");
+                const requestLine = `${req.method || 'GET'} ${req.url || '/'}`;
+                this.config.log.debug(`Ignoring non-ACME challenge request: ${requestLine}`);
             } else {
                 const token = matches[1];
                 this.config.log.debug(`Got challenge for ${token}`);
