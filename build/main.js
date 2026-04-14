@@ -921,14 +921,8 @@ class AcmeAdapter extends utils.Adapter {
                         challengePriority.push('dns-01');
                     }
                     const aliasDnsOnlyFlow = !!this.config.dns01Alias && this.config.dns01Active && !this.config.http01Active;
-                    const adapterAliasPollingEnabled = aliasDnsOnlyFlow && this.config.dns01Module !== 'acme-dns-01-netcup';
                     if (aliasDnsOnlyFlow) {
-                        if (adapterAliasPollingEnabled) {
-                            this.log.info('DNS-01 alias configured in DNS-only mode: waiting for DNS propagation before continuing the ACME flow.');
-                        }
-                        else {
-                            this.log.info('DNS-01 alias configured in DNS-only mode with Netcup module: relying on Netcup plugin propagation verification.');
-                        }
+                        this.log.info('DNS-01 alias configured in DNS-only mode: waiting for DNS propagation before continuing the ACME flow.');
                     }
                     cert = (await this.acmeClient.auto({
                         csr,
@@ -951,16 +945,18 @@ class AcmeAdapter extends utils.Adapter {
                                 this.dnsChallengeCache[this.getDnsChallengeCacheKey(authz, challenge)] =
                                     challengeData;
                                 await handler.set(challengeData);
-                                if (adapterAliasPollingEnabled) {
-                                    const sourceDnsHost = `_acme-challenge.${authz.identifier.value}`;
-                                    const challengeDnsHost = challengeData?.challenge?.dnsHost ||
-                                        challengeData?.dnsHost ||
-                                        `_acme-challenge.${authz.identifier.value}`;
+                                const sourceDnsHost = `_acme-challenge.${authz.identifier.value}`;
+                                const challengeDnsHost = challengeData?.challenge?.dnsHost || challengeData?.dnsHost || sourceDnsHost;
+                                const expectedDnsAuthorization = challengeData?.challenge?.dnsAuthorization;
+                                if (!expectedDnsAuthorization) {
+                                    throw new Error(`Missing dnsAuthorization in challenge payload for ${challengeDnsHost}`);
+                                }
+                                if (challengeDnsHost !== sourceDnsHost) {
                                     this.log.info(`Waiting for DNS alias delegation of ${sourceDnsHost} to ${challengeDnsHost} before notifying the CA.`);
                                     await this.waitForDnsAliasDelegation(sourceDnsHost, challengeDnsHost);
-                                    this.log.info(`Waiting for DNS propagation of ${challengeDnsHost} on system/public resolvers before notifying the CA.`);
-                                    await this.waitForDnsPropagation(challengeDnsHost, challengeData.challenge.dnsAuthorization);
                                 }
+                                this.log.info(`Waiting for DNS propagation of ${challengeDnsHost} on system/public resolvers before notifying the CA.`);
+                                await this.waitForDnsPropagation(challengeDnsHost, expectedDnsAuthorization);
                             }
                             else {
                                 const challengeData = {
