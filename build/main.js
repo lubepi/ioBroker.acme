@@ -427,9 +427,19 @@ class AcmeAdapter extends utils.Adapter {
             throw new Error('HTTP-01 challenge handler is not initialized');
         }
         this.http01ServerInitPromise = (async () => {
-            await handler.init({});
-            this.http01ServerReady = true;
-            this.log.info(`HTTP-01 challenge server started on ${this.config.bind}:${this.config.port}`);
+            try {
+                await handler.init({});
+                this.http01ServerReady = true;
+                this.log.info(`HTTP-01 challenge server started on ${this.config.bind}:${this.config.port}`);
+            }
+            catch (err) {
+                this.http01ServerReady = false;
+                const reason = AcmeAdapter.getErrorMessage(err);
+                const hint = this.config.http01StopConflictingAdapters === true
+                    ? 'Choose a free HTTP-01 port or verify bind/address settings.'
+                    : 'Choose a free HTTP-01 port or enable automatic stopping of conflicting adapters.';
+                throw new Error(`HTTP-01 challenge server could not start on ${this.config.bind}:${this.config.port}: ${reason}. ${hint}`);
+            }
         })();
         try {
             await this.http01ServerInitPromise;
@@ -1040,6 +1050,11 @@ class AcmeAdapter extends utils.Adapter {
             const restoreDnsOverride = await this.activateCollectionDnsOverride(collection.id);
             let cert;
             try {
+                const hasNonWildcardDomains = domains.some(domain => !domain.startsWith('*.'));
+                if (this.config.http01Active && hasNonWildcardDomains) {
+                    this.log.info(`HTTP-01 preflight: validating listener availability on ${this.config.bind}:${this.config.port} before placing order.`);
+                    await this.ensureHttp01ChallengeServerStarted();
+                }
                 // Generate CSR
                 const [serverKey, csr] = await acme.crypto.createCsr({
                     commonName: collection.commonName.split(',')[0].trim(),
