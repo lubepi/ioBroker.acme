@@ -719,20 +719,34 @@ class AcmeAdapter extends utils.Adapter {
     private async waitForDnsPropagation(recordName: string, expectedValue: string): Promise<void> {
         const waitForMs = 5000;
         const maxAttempts = 240;
-        const resolver = new dnsPromises.Resolver();
+        const resolvers: Array<{ name: string; resolver: dnsPromises.Resolver }> = [
+            { name: 'system resolver', resolver: new dnsPromises.Resolver() },
+            { name: '1.1.1.1', resolver: new dnsPromises.Resolver() },
+            { name: '8.8.8.8', resolver: new dnsPromises.Resolver() },
+        ];
+
+        resolvers[1].resolver.setServers(['1.1.1.1']);
+        resolvers[2].resolver.setServers(['8.8.8.8']);
 
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-            const values = await this.resolveTxtViaResolver(resolver, recordName);
+            const checks = await Promise.all(
+                resolvers.map(async ({ name, resolver }) => {
+                    const values = await this.resolveTxtViaResolver(resolver, recordName);
+                    return {
+                        name,
+                        ok: values.includes(expectedValue),
+                    };
+                }),
+            );
 
-            // acme-client performs local DNS pre-flight checks, therefore the
-            // system resolver must see the TXT record before we proceed.
-            if (values.includes(expectedValue)) {
-                this.log.info(`DNS propagation verified for ${recordName} on system resolver.`);
+            const ready = checks.find(check => check.ok);
+            if (ready) {
+                this.log.info(`DNS propagation verified for ${recordName} on ${ready.name}.`);
                 return;
             }
 
             this.log.debug(
-                `DNS propagation not yet complete for ${recordName} on system resolver. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`,
+                `DNS propagation not yet complete for ${recordName} on system/public resolvers. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`,
             );
 
             await new Promise(resolve => setTimeout(resolve, waitForMs));
@@ -988,10 +1002,18 @@ class AcmeAdapter extends utils.Adapter {
 
                     const aliasDnsOnlyFlow =
                         !!this.config.dns01Alias && this.config.dns01Active && !this.config.http01Active;
+                    const adapterAliasPollingEnabled =
+                        aliasDnsOnlyFlow && this.config.dns01Module !== 'acme-dns-01-netcup';
                     if (aliasDnsOnlyFlow) {
-                        this.log.info(
-                            'DNS-01 alias configured in DNS-only mode: waiting for DNS propagation before continuing the ACME flow.',
-                        );
+                        if (adapterAliasPollingEnabled) {
+                            this.log.info(
+                                'DNS-01 alias configured in DNS-only mode: waiting for DNS propagation before continuing the ACME flow.',
+                            );
+                        } else {
+                            this.log.info(
+                                'DNS-01 alias configured in DNS-only mode with Netcup module: relying on Netcup plugin propagation verification.',
+                            );
+                        }
                     }
 
                     cert = (
@@ -999,6 +1021,7 @@ class AcmeAdapter extends utils.Adapter {
                             csr,
                             email: this.config.maintainerEmail,
                             termsOfServiceAgreed: true,
+                            skipChallengeVerification: aliasDnsOnlyFlow,
                             challengePriority,
                             challengeCreateFn: async (authz, challenge, keyAuthorization) => {
                                 this.log.debug(`Satisfying challenge ${challenge.type} for ${authz.identifier.value}`);
@@ -1022,13 +1045,13 @@ class AcmeAdapter extends utils.Adapter {
                                         challengeData;
                                     await handler.set(challengeData);
 
-                                    if (aliasDnsOnlyFlow) {
+                                    if (adapterAliasPollingEnabled) {
                                         const challengeDnsHost =
                                             challengeData?.challenge?.dnsHost ||
                                             challengeData?.dnsHost ||
                                             `_acme-challenge.${authz.identifier.value}`;
                                         this.log.info(
-                                            `Waiting for DNS propagation of ${challengeDnsHost} on system and public resolvers before notifying the CA.`,
+                                            `Waiting for DNS propagation of ${challengeDnsHost} on system/public resolvers before notifying the CA.`,
                                         );
                                         await this.waitForDnsPropagation(
                                             challengeDnsHost,
