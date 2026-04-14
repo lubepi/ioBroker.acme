@@ -61,6 +61,8 @@ class AcmeAdapter extends utils.Adapter {
     private readonly dnsChallengeCache: Record<string, any>;
     private readonly acmeDnsCnameCheckedHosts: Set<string>;
     private acmeDnsAutoRegisterBlocked: boolean;
+    private http01ServerReady: boolean;
+    private http01ServerInitPromise: Promise<void> | null;
 
     /**
      * Safely extract an error message from an unknown error value.
@@ -88,6 +90,8 @@ class AcmeAdapter extends utils.Adapter {
         this.dnsChallengeCache = {};
         this.acmeDnsCnameCheckedHosts = new Set();
         this.acmeDnsAutoRegisterBlocked = false;
+        this.http01ServerReady = false;
+        this.http01ServerInitPromise = null;
 
         this.on('ready', this.onReady.bind(this));
         this.on('unload', this.onUnload.bind(this));
@@ -107,6 +111,8 @@ class AcmeAdapter extends utils.Adapter {
                     delete this.dnsChallengeCache[key];
                 }
                 this.acmeDnsCnameCheckedHosts.clear();
+                this.http01ServerReady = false;
+                this.http01ServerInitPromise = null;
                 await this.restoreAdaptersOnSamePort();
             } catch (err) {
                 this.log.warn(`Error during unload cleanup: ${AcmeAdapter.getErrorMessage(err)}`);
@@ -434,6 +440,38 @@ class AcmeAdapter extends utils.Adapter {
                     },
                 });
             }
+        }
+    }
+
+    private async ensureHttp01ChallengeServerStarted(): Promise<void> {
+        if (!this.config.http01Active) {
+            return;
+        }
+
+        if (this.http01ServerReady) {
+            return;
+        }
+
+        if (this.http01ServerInitPromise) {
+            await this.http01ServerInitPromise;
+            return;
+        }
+
+        const handler = this.challenges['http-01'];
+        if (!handler) {
+            throw new Error('HTTP-01 challenge handler is not initialized');
+        }
+
+        this.http01ServerInitPromise = (async () => {
+            await handler.init({});
+            this.http01ServerReady = true;
+            this.log.info(`HTTP-01 challenge server started on ${this.config.bind}:${this.config.port}`);
+        })();
+
+        try {
+            await this.http01ServerInitPromise;
+        } finally {
+            this.http01ServerInitPromise = null;
         }
     }
 
@@ -1275,6 +1313,8 @@ class AcmeAdapter extends utils.Adapter {
 
                                     await this.waitForDnsPropagation(challengeDnsHost, expectedDnsAuthorization);
                                 } else {
+                                    await this.ensureHttp01ChallengeServerStarted();
+
                                     const challengeData: any = {
                                         identifier: { ...authz.identifier },
                                         token: challenge.token,
