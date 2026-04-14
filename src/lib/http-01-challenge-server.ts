@@ -31,6 +31,7 @@ class Http01ChallengeServer implements ChallengeServer {
     private readonly config: ChallengeServerConfig;
     private readonly memdb: Record<string, { keyAuthorization: string }> = {};
     private server: Server | null = null;
+    private isListening = false;
 
     constructor(config: ChallengeServerConfig) {
         this.config = config;
@@ -44,7 +45,10 @@ class Http01ChallengeServer implements ChallengeServer {
         this.server = createServer();
 
         this.server.on('error', (err: Error) => {
-            this.config.log.error(`Challenge server error: ${err.message}`);
+            // Startup errors are handled by init(); only log runtime errors here.
+            if (this.isListening) {
+                this.config.log.error(`Challenge server error: ${err.message}`);
+            }
         });
 
         this.server.on('request', (req: IncomingMessage, res: ServerResponse) => {
@@ -80,15 +84,20 @@ class Http01ChallengeServer implements ChallengeServer {
                 resolve(null);
             } else {
                 this.createServer();
+                const startupErrorHandler = (err: Error): void => {
+                    this.server?.off('error', startupErrorHandler);
+                    this.isListening = false;
+                    reject(err);
+                };
+
+                this.server!.once('error', startupErrorHandler);
                 this.server!.listen(this.config.port, this.config.address, () => {
+                    this.server?.off('error', startupErrorHandler);
+                    this.isListening = true;
                     this.config.log.info(
                         `challengeServer listening on ${this.config.address} port ${this.config.port}`,
                     );
                     resolve(null);
-                });
-                this.server!.on('error', (err: Error) => {
-                    this.config.log.error(`Challenge server failed to start: ${err.message}`);
-                    reject(err);
                 });
             }
         });
@@ -124,6 +133,7 @@ class Http01ChallengeServer implements ChallengeServer {
             this.config.log.warn('Shutdown called but nothing to do');
         } else {
             this.config.log.info('Shutting down challengeServer');
+            this.isListening = false;
             this.server.close();
             this.server = null;
         }

@@ -11,6 +11,7 @@ class Http01ChallengeServer {
     config;
     memdb = {};
     server = null;
+    isListening = false;
     constructor(config) {
         this.config = config;
     }
@@ -20,7 +21,10 @@ class Http01ChallengeServer {
     createServer() {
         this.server = (0, node_http_1.createServer)();
         this.server.on('error', (err) => {
-            this.config.log.error(`Challenge server error: ${err.message}`);
+            // Startup errors are handled by init(); only log runtime errors here.
+            if (this.isListening) {
+                this.config.log.error(`Challenge server error: ${err.message}`);
+            }
         });
         this.server.on('request', (req, res) => {
             let response = '';
@@ -57,13 +61,17 @@ class Http01ChallengeServer {
             }
             else {
                 this.createServer();
+                const startupErrorHandler = (err) => {
+                    this.server?.off('error', startupErrorHandler);
+                    this.isListening = false;
+                    reject(err);
+                };
+                this.server.once('error', startupErrorHandler);
                 this.server.listen(this.config.port, this.config.address, () => {
+                    this.server?.off('error', startupErrorHandler);
+                    this.isListening = true;
                     this.config.log.info(`challengeServer listening on ${this.config.address} port ${this.config.port}`);
                     resolve(null);
-                });
-                this.server.on('error', (err) => {
-                    this.config.log.error(`Challenge server failed to start: ${err.message}`);
-                    reject(err);
                 });
             }
         });
@@ -96,6 +104,7 @@ class Http01ChallengeServer {
         }
         else {
             this.config.log.info('Shutting down challengeServer');
+            this.isListening = false;
             this.server.close();
             this.server = null;
         }
