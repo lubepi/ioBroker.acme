@@ -663,12 +663,12 @@ class AcmeAdapter extends utils.Adapter {
                     ok: values.includes(expectedValue),
                 };
             }));
-            const ready = checks.find(check => check.ok);
-            if (ready) {
-                this.log.info(`DNS propagation verified for ${recordName} on ${ready.name}.`);
+            const okResolvers = checks.filter(check => check.ok).map(check => check.name);
+            if (okResolvers.length >= 2) {
+                this.log.info(`DNS propagation verified for ${recordName} on ${okResolvers.join(', ')} (quorum reached).`);
                 return;
             }
-            this.log.debug(`DNS propagation not yet complete for ${recordName} on system/public resolvers. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`);
+            this.log.debug(`DNS propagation not yet complete for ${recordName}. Visible on: ${okResolvers.length ? okResolvers.join(', ') : 'none'}. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`);
             await new Promise(resolve => setTimeout(resolve, waitForMs));
         }
         throw new Error(`Timed out waiting for DNS propagation of ${recordName}`);
