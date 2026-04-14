@@ -755,6 +755,63 @@ class AcmeAdapter extends utils.Adapter {
         throw new Error(`Timed out waiting for DNS propagation of ${recordName}`);
     }
 
+    private async waitForDnsAliasDelegation(sourceRecordName: string, targetRecordName: string): Promise<void> {
+        const waitForMs = 5000;
+        const maxAttempts = 3;
+        const normalizedTarget = this.normalizeDnsName(targetRecordName);
+        const resolvers: Array<{ name: string; resolver: dnsPromises.Resolver }> = [
+            { name: 'system resolver', resolver: new dnsPromises.Resolver() },
+            { name: '1.1.1.1', resolver: new dnsPromises.Resolver() },
+            { name: '8.8.8.8', resolver: new dnsPromises.Resolver() },
+        ];
+
+        resolvers[1].resolver.setServers(['1.1.1.1']);
+        resolvers[2].resolver.setServers(['8.8.8.8']);
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+            const checks = await Promise.all(
+                resolvers.map(async ({ name, resolver }) => {
+                    try {
+                        const cnameRecords = await resolver.resolveCname(sourceRecordName);
+                        const ok = cnameRecords.some(record => this.normalizeDnsName(record) === normalizedTarget);
+                        return {
+                            name,
+                            ok,
+                        };
+                    } catch (err) {
+                        this.log.debug(
+                            `DNS alias CNAME lookup failed for ${sourceRecordName} on ${name}: ${AcmeAdapter.getErrorMessage(err)}`,
+                        );
+                        return {
+                            name,
+                            ok: false,
+                        };
+                    }
+                }),
+            );
+
+            const ready = checks.find(check => check.ok);
+            if (ready) {
+                this.log.info(
+                    `DNS alias delegation verified for ${sourceRecordName} -> ${targetRecordName} on ${ready.name}.`,
+                );
+                return;
+            }
+
+            this.log.debug(
+                `DNS alias delegation not yet visible for ${sourceRecordName} -> ${targetRecordName}. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`,
+            );
+
+            await new Promise(resolve => setTimeout(resolve, waitForMs));
+        }
+
+        const message =
+            `Alias delegation not visible: ${sourceRecordName} -> ${targetRecordName}. ` +
+            'The CNAME entry is either missing or not yet visible on tested resolvers.';
+        this.log.warn(message);
+        throw new Error(message);
+    }
+
     private async warnIfAcmeDnsDelegationLooksWrong(
         collectionId: string,
         authz: any,
@@ -1046,10 +1103,15 @@ class AcmeAdapter extends utils.Adapter {
                                     await handler.set(challengeData);
 
                                     if (adapterAliasPollingEnabled) {
+                                        const sourceDnsHost = `_acme-challenge.${authz.identifier.value}`;
                                         const challengeDnsHost =
                                             challengeData?.challenge?.dnsHost ||
                                             challengeData?.dnsHost ||
                                             `_acme-challenge.${authz.identifier.value}`;
+                                        this.log.info(
+                                            `Waiting for DNS alias delegation of ${sourceDnsHost} to ${challengeDnsHost} before notifying the CA.`,
+                                        );
+                                        await this.waitForDnsAliasDelegation(sourceDnsHost, challengeDnsHost);
                                         this.log.info(
                                             `Waiting for DNS propagation of ${challengeDnsHost} on system/public resolvers before notifying the CA.`,
                                         );
@@ -1138,9 +1200,16 @@ class AcmeAdapter extends utils.Adapter {
                 await this.certManager?.setCollection(collection.id, collectionToSet);
                 this.log.info(`Collection ${collection.id} order success`);
             } catch (err) {
-                this.log.error(
-                    `Certificate request for ${collection.id} (${domains?.join(', ')}) failed: ${AcmeAdapter.getErrorMessage(err)}`,
-                );
+                const errorMessage = AcmeAdapter.getErrorMessage(err);
+                if (errorMessage.startsWith('Alias delegation not visible:')) {
+                    this.log.warn(
+                        `Certificate request for ${collection.id} (${domains?.join(', ')}) aborted: ${errorMessage}`,
+                    );
+                } else {
+                    this.log.error(
+                        `Certificate request for ${collection.id} (${domains?.join(', ')}) failed: ${errorMessage}`,
+                    );
+                }
             } finally {
                 restoreDnsOverride();
             }
