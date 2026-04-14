@@ -1,7 +1,88 @@
 const path = require('path');
 const crypto = require('node:crypto');
+const assert = require('node:assert/strict');
+const net = require('node:net');
 const { tests } = require('@iobroker/testing');
 const { buildDnsChallengeData, computeDnsAuthorization, normalizeDnsAlias } = require('../build/lib/dns-01-utils');
+
+const mockAcmeClientPath = path.join(__dirname, 'mock-acme-client.js');
+
+function createAcmeMockEnv() {
+    const previous = process.env.NODE_OPTIONS ? `${process.env.NODE_OPTIONS} ` : '';
+    return {
+        NODE_OPTIONS: `${previous}--require ${mockAcmeClientPath}`,
+    };
+}
+
+async function waitForAdapterStop(harness, timeoutMs = 45_000) {
+    const start = Date.now();
+    while (!harness.didAdapterStop()) {
+        if (Date.now() - start > timeoutMs) {
+            throw new Error(`Adapter did not stop within ${timeoutMs}ms`);
+        }
+        await new Promise(resolve => setTimeout(resolve, 250));
+    }
+}
+
+async function getAcmeHost(harness) {
+    const acmeObj = await harness.objects.getObjectAsync('system.adapter.acme.0');
+    if (!acmeObj?.common?.host) {
+        throw new Error('system.adapter.acme.0 common.host not found');
+    }
+    return acmeObj.common.host;
+}
+
+async function createConflictingAdapter(harness, { id, host, bind, port, enabled }) {
+    const now = Date.now();
+    await harness.objects.setObjectAsync(id, {
+        _id: id,
+        type: 'instance',
+        common: {
+            name: 'simple-api',
+            enabled,
+            host,
+            mode: 'daemon',
+            titleLang: { en: 'simple-api' },
+        },
+        native: {
+            bind,
+            port,
+            secure: false,
+            leEnabled: false,
+            leUpdate: false,
+            leCheckPort: 80,
+        },
+    });
+
+    await harness.states.setStateAsync(`${id}.alive`, {
+        val: false,
+        ack: true,
+        from: 'system.host.testing',
+        ts: now,
+        lc: now,
+    });
+}
+
+async function configureHttpOnlyCollection(harness, { id, commonName, port, stopConflicting }) {
+    await harness.changeAdapterConfig('acme', {
+        native: {
+            maintainerEmail: 'test@example.com',
+            useStaging: true,
+            bind: '0.0.0.0',
+            port,
+            http01Active: true,
+            http01StopConflictingAdapters: stopConflicting,
+            dns01Active: false,
+            collections: [
+                {
+                    id,
+                    commonName,
+                    altNames: '',
+                },
+            ],
+        },
+    });
+}
 
 // Run integration tests - See https://github.com/ioBroker/testing for a detailed explanation and further options
 tests.integration(path.join(__dirname, '..'), {
@@ -137,6 +218,189 @@ tests.integration(path.join(__dirname, '..'), {
                 }
                 if (!updatedCollections.foreignCollection) {
                     throw new Error('Collection from another adapter should not be removed');
+                }
+            });
+        });
+
+        suite('HTTP-01 and wildcard guards', getHarness => {
+            let harness;
+
+            before(() => {
+                harness = getHarness();
+            });
+
+            it('aborts wildcard issuance when only HTTP-01 is active', async function () {
+                this.timeout(60_000);
+
+                await configureHttpOnlyCollection(harness, {
+                    id: 'wildOnly',
+                    commonName: '*.example.com',
+                    port: 18081,
+                    stopConflicting: true,
+                });
+
+                await harness.startAdapter(createAcmeMockEnv());
+                await waitForAdapterStop(harness);
+
+                const certsObject = await harness.objects.getObjectAsync('system.certificates');
+                const collections = certsObject?.native?.collections || {};
+                assert.equal(collections.wildOnly, undefined, 'Wildcard collection must not be created in HTTP-only mode');
+            });
+        });
+
+        suite('HTTP-01 stop/restore with enabled stop option', getHarness => {
+            let harness;
+
+            before(() => {
+                harness = getHarness();
+            });
+
+            it('temporarily disables and restores conflicting adapter when stop option is enabled', async function () {
+                this.timeout(90_000);
+
+                const conflictId = 'system.adapter.simple-api.0';
+                const host = await getAcmeHost(harness);
+                const port = 18082;
+
+                await createConflictingAdapter(harness, {
+                    id: conflictId,
+                    host,
+                    bind: '0.0.0.0',
+                    port,
+                    enabled: true,
+                });
+
+                const enabledTransitions = [];
+                harness.on('objectChange', (id, obj) => {
+                    if (id === conflictId && obj?.common && typeof obj.common.enabled === 'boolean') {
+                        enabledTransitions.push(obj.common.enabled);
+                    }
+                });
+
+                await configureHttpOnlyCollection(harness, {
+                    id: 'normal-enabled',
+                    commonName: 'normal-enabled.example.com',
+                    port,
+                    stopConflicting: true,
+                });
+
+                await harness.startAdapter(createAcmeMockEnv());
+                await waitForAdapterStop(harness);
+
+                const after = await harness.objects.getObjectAsync(conflictId);
+                const falseIndex = enabledTransitions.indexOf(false);
+                const trueAfterFalseIndex = enabledTransitions.findIndex((val, idx) => idx > falseIndex && val === true);
+
+                assert.equal(after?.common?.enabled, true, 'Conflicting adapter must be re-enabled at the end');
+                assert.ok(falseIndex >= 0, 'Conflicting adapter should be disabled during challenge processing');
+                assert.ok(trueAfterFalseIndex >= 0, 'Conflicting adapter should be enabled again after processing');
+            });
+        });
+
+        suite('HTTP-01 with disabled stop option', getHarness => {
+            let harness;
+
+            before(() => {
+                harness = getHarness();
+            });
+
+            it('does not disable conflicting adapter when stop option is disabled', async function () {
+                this.timeout(90_000);
+
+                const conflictId = 'system.adapter.simple-api.0';
+                const host = await getAcmeHost(harness);
+                const port = 18083;
+
+                await createConflictingAdapter(harness, {
+                    id: conflictId,
+                    host,
+                    bind: '0.0.0.0',
+                    port,
+                    enabled: true,
+                });
+
+                const enabledTransitions = [];
+                harness.on('objectChange', (id, obj) => {
+                    if (id === conflictId && obj?.common && typeof obj.common.enabled === 'boolean') {
+                        enabledTransitions.push(obj.common.enabled);
+                    }
+                });
+
+                await configureHttpOnlyCollection(harness, {
+                    id: 'normal-disabled',
+                    commonName: 'normal-disabled.example.com',
+                    port,
+                    stopConflicting: false,
+                });
+
+                await harness.startAdapter(createAcmeMockEnv());
+                await waitForAdapterStop(harness);
+
+                const after = await harness.objects.getObjectAsync(conflictId);
+                assert.equal(after?.common?.enabled, true, 'Conflicting adapter should stay enabled');
+                assert.ok(!enabledTransitions.includes(false), 'Conflicting adapter must not be disabled when stop option is off');
+            });
+        });
+
+        suite('HTTP-01 restore on error path', getHarness => {
+            let harness;
+
+            before(() => {
+                harness = getHarness();
+            });
+
+            it('restores conflicting adapter even when request fails because port stays occupied', async function () {
+                this.timeout(90_000);
+
+                const conflictId = 'system.adapter.simple-api.0';
+                const host = await getAcmeHost(harness);
+                const port = 18084;
+                const blocker = net.createServer();
+
+                await new Promise((resolve, reject) => {
+                    blocker.once('error', reject);
+                    blocker.listen(port, '0.0.0.0', () => resolve());
+                });
+
+                try {
+                    await createConflictingAdapter(harness, {
+                        id: conflictId,
+                        host,
+                        bind: '0.0.0.0',
+                        port,
+                        enabled: true,
+                    });
+
+                    const enabledTransitions = [];
+                    harness.on('objectChange', (id, obj) => {
+                        if (id === conflictId && obj?.common && typeof obj.common.enabled === 'boolean') {
+                            enabledTransitions.push(obj.common.enabled);
+                        }
+                    });
+
+                    await configureHttpOnlyCollection(harness, {
+                        id: 'normal-error',
+                        commonName: 'normal-error.example.com',
+                        port,
+                        stopConflicting: true,
+                    });
+
+                    await harness.startAdapter(createAcmeMockEnv());
+                    await waitForAdapterStop(harness);
+
+                    const after = await harness.objects.getObjectAsync(conflictId);
+                    const falseIndex = enabledTransitions.indexOf(false);
+                    const trueAfterFalseIndex = enabledTransitions.findIndex((val, idx) => idx > falseIndex && val === true);
+
+                    assert.equal(
+                        after?.common?.enabled,
+                        true,
+                        'Conflicting adapter must be re-enabled even after HTTP-01 failure',
+                    );
+                    assert.ok(falseIndex >= 0, 'Conflicting adapter should be disabled during the failed run');
+                    assert.ok(trueAfterFalseIndex >= 0, 'Conflicting adapter should be re-enabled after failed run');
+                } finally {
+                    await new Promise(resolve => blocker.close(() => resolve()));
                 }
             });
         });
