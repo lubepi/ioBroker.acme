@@ -66,6 +66,8 @@ Important:
 
 - HTTP-01 works only if the certificate domain reaches your ioBroker host directly, or reaches a reverse proxy that forwards ACME challenge requests to ioBroker.
 - If you prefer reverse-proxy routing in ioBroker, you can use [ioBroker.simple-proxy-manager](https://github.com/lubepi/ioBroker.simple-proxy-manager).
+- If both HTTP-01 and DNS-01 are enabled, ACME challenge selection is prioritized as: HTTP-01 for normal domains and DNS-01 for wildcards. There is no automatic fallback to DNS-01 when HTTP-01 fails for a normal domain.
+- For HTTP-01 on normal (non-wildcard) domains, the adapter performs a listener preflight before placing an order and fails fast if the configured bind/port is unavailable.
 
 Example scenarios:
 
@@ -85,9 +87,10 @@ Example scenarios:
 3. Scenario 1 & 2 are impossible because another service is running on port 80 of the publicly reachable IP address.
 
     Possible solutions:
-    1. If the other service is an IoB adapter following port configuration naming standards, ACME can stop it before attempting to order a certificate, use port 80 for the HTTP-01 challenge server, and restart any stopped adapter when done.
+    1. If the other service is an IoB adapter that exposes standard ioBroker `native.bind`/`native.port` configuration, ACME can stop it before attempting to order a certificate, use port 80 for the HTTP-01 challenge server, and restart any stopped adapter when done.
 
         Obviously, this causes a short outage for the other adapter which may not be desirable.
+        Automatic stopping only applies to ioBroker adapters; non-ioBroker services on the host cannot be stopped by ACME.
         For reverse proxy setups, leave **Allow ACME to stop conflicting adapters on HTTP-01 port** disabled and forward `/.well-known/acme-challenge/` to ACME on a different local port.
 
     2. Set up a named virtual host HTTP proxy on port 80 of the router or publicly reachable IoB host.
@@ -108,6 +111,8 @@ Example scenarios:
 #### DNS-01
 
 Various DNS-01 challenge plugins are implemented for popular domain hosting platforms.
+
+For DNS-01, the adapter verifies propagation before notifying the CA. The current strategy is authoritative-resolver-first with system-resolver fallback when authoritative resolvers are unavailable. For DNS alias flows, the adapter additionally verifies CNAME delegation before TXT propagation checks.
 
 Available module choices in the adapter UI:
 
@@ -180,6 +185,7 @@ Use this if you want isolated or self-hosted DNS-01 handling.
 Notes:
 - Use only one domain per collection, as acme-dns provides only one TXT target per account. Since this adapter's underlying library (acme-client) processes authorizations in parallel, combining multiple domains in a single collection may be unreliable. For privilege isolation, use a dedicated acme-dns account per collection.
 - The adapter performs a DNS CNAME precheck and warns if delegation looks missing or mismatched.
+- In DNS-only alias flows, missing alias delegation is treated as a hard precondition and the request is aborted early with a clear warning.
 - In automatic mode, the `CNAME target (auto)` column shows the target returned by acme-dns registration.
 
 #### References
@@ -197,6 +203,10 @@ See [acme-client](https://www.npmjs.com/package/acme-client) for implementation 
 - (lubepi) Added `acme-dns` CNAME delegation precheck with actionable warnings for missing/mismatched targets.
 - (lubepi) Added HTTP-01 admin option to allow temporary stopping of conflicting adapters on the challenge port.
 - (lubepi) HTTP-01 conflicting-adapter stop is disabled by default (explicit opt-in).
+- (lubepi) Added fail-fast HTTP-01 listener preflight for non-wildcard domains (clear bind/port conflict errors) and early wildcard guard: wildcard issuance is aborted with a warning when only HTTP-01 is enabled and DNS-01 is disabled.
+- (lubepi) Improved HTTP-01 challenge server lifecycle: lazy startup before challenge handling and reduced duplicate startup error logs.
+- (lubepi) Enforced adapter-side DNS-01 propagation checks before CA notification with authoritative-first resolver strategy and system fallback.
+- (lubepi) Updated `acme-dns-01-netcup` integration to align provider behavior with adapter-side propagation control.
 - (lubepi) Added `deSEC` DNS-01 provider support and updated DNS provider dependencies (including `acme-dns-01-netcup` update and `acme-dns-01-route53` removal).
 - (lubepi) Expanded integration tests for DNS alias utilities and safe purge behavior for expired, de-configured collections.
 

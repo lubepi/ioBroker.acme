@@ -1002,6 +1002,7 @@ class AcmeAdapter extends utils.Adapter {
                 .filter(n => n));
         }
         this.log.debug(`domains: ${JSON.stringify(domains)}`);
+        const wildcardDomains = domains.filter(domain => domain.startsWith('*.'));
         // Get an existing collection & see if it needs renewing
         let create = false;
         const existingCollection = (await this.certManager?.getCollection(collection.id));
@@ -1041,6 +1042,10 @@ class AcmeAdapter extends utils.Adapter {
             }
         }
         if (create) {
+            if (wildcardDomains.length > 0 && this.config.http01Active && !this.config.dns01Active) {
+                this.log.warn(`Collection ${collection.id} contains wildcard domain(s) (${wildcardDomains.join(', ')}), but DNS-01 is disabled. Wildcard certificates require DNS-01. Enable DNS-01 and retry.`);
+                return;
+            }
             // stopAdaptersOnSamePort can be called many times as has its own checks to prevent unnecessary action.
             await this.stopAdaptersOnSamePort();
             if (!this.acmeClient || !this.account.full) {
