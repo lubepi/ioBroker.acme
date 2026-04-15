@@ -61,15 +61,18 @@ class Http01ChallengeServer implements ChallengeServer {
                 const requestLine = `${req.method || 'GET'} ${req.url || '/'}`;
                 this.config.log.debug(`Ignoring non-ACME challenge request: ${requestLine}`);
             } else {
-                const token = matches[1];
-                this.config.log.debug(`Got challenge for ${token}`);
-                const tokenChallenge = this.memdb[token];
-                if (!tokenChallenge) {
+                const rawToken = matches[1] || '';
+                const tokenWithoutQuery = rawToken.split('?')[0];
+                const normalizedToken = decodeURIComponent(tokenWithoutQuery).replace(/\/+$/, '');
+                this.config.log.debug(`Got challenge for ${normalizedToken}`);
+                const knownTokens = Object.keys(this.memdb);
+                const matchedToken = knownTokens.find(knownToken => knownToken === normalizedToken);
+                if (!matchedToken) {
                     res.statusCode = 404;
-                    this.config.log.warn(`Challenge server request token not in DB: ${token}`);
+                    this.config.log.warn(`Challenge server request token not in DB: ${normalizedToken}`);
                 } else {
                     res.statusCode = 200;
-                    response = tokenChallenge.keyAuthorization;
+                    response = this.memdb[matchedToken].keyAuthorization;
                 }
             }
             this.config.log.debug(`Challenge server status & response: ${res.statusCode} ${response}`);

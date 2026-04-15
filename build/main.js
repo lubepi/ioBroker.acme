@@ -43,7 +43,7 @@ const utils = __importStar(require("@iobroker/adapter-core"));
 const webserver_1 = require("@iobroker/webserver");
 const acme = __importStar(require("acme-client"));
 const node_crypto_1 = __importDefault(require("node:crypto"));
-const node_dns_1 = require("node:dns");
+const node_dns_1 = __importStar(require("node:dns"));
 const node_net_1 = __importDefault(require("node:net"));
 const node_util_1 = require("node:util");
 const x509_js_1 = __importDefault(require("x509.js"));
@@ -104,10 +104,10 @@ class AcmeAdapter extends utils.Adapter {
             return `${normalizedMessage}.${hint}`;
         };
         const stack = err instanceof Error ? err.stack || '' : '';
-        const transportOrNetworkError = /(timed?\s*out|timeout|econnreset|econnrefused|econnaborted|enotfound|eai_again|etimedout|ehostunreach|enetunreach|socket hang up|fetch failed|network error|connection reset|tls|ssl)/i.test(errorMessage) || /acme-client\/src\/axios\.js/.test(stack);
-        const routingHintForError = transportOrNetworkError ? http01RoutingHint : '';
+        const transportOrNetworkError = /(timed?\s*out|timeout|econnreset|econnrefused|econnaborted|enotfound|eai_again|etimedout|ehostunreach|enetunreach|socket hang up|fetch failed|network error|connection reset|tls|ssl)/i.test(errorMessage);
         const acmeClientTransportBug = /Cannot read properties of undefined \(reading 'config'\)/.test(errorMessage) &&
             /acme-client\/src\/axios\.js/.test(stack);
+        const routingHintForError = transportOrNetworkError || acmeClientTransportBug ? http01RoutingHint : '';
         if (acmeClientTransportBug) {
             const transportHint = ' ACME transport error: no valid HTTP response was available from the ACME API (often timeout/connection reset/proxy or DNS/network interruption).';
             return appendHint(errorMessage + transportHint, routingHintForError);
@@ -498,6 +498,44 @@ class AcmeAdapter extends utils.Adapter {
         finally {
             this.http01ServerInitPromise = null;
         }
+    }
+    applyHttp01SelfCheckNetworkPreference(enable) {
+        if (!enable) {
+            return () => { };
+        }
+        const restoreActions = [];
+        try {
+            const previousAutoSelectFamily = node_net_1.default.getDefaultAutoSelectFamily();
+            node_net_1.default.setDefaultAutoSelectFamily(true);
+            restoreActions.push(() => {
+                node_net_1.default.setDefaultAutoSelectFamily(previousAutoSelectFamily);
+            });
+            this.log.debug('HTTP-01 self-check: enabled dual-stack auto family selection');
+        }
+        catch (err) {
+            this.log.debug(`HTTP-01 self-check: unable to enable dual-stack auto family selection (${AcmeAdapter.getErrorMessage(err)})`);
+        }
+        try {
+            const previousOrder = node_dns_1.default.getDefaultResultOrder();
+            node_dns_1.default.setDefaultResultOrder('ipv6first');
+            restoreActions.push(() => {
+                node_dns_1.default.setDefaultResultOrder(previousOrder);
+            });
+            this.log.debug('HTTP-01 self-check: using IPv6-first DNS resolution for local ACME verification');
+        }
+        catch (err) {
+            this.log.debug(`HTTP-01 self-check: unable to apply IPv6-first DNS preference (${AcmeAdapter.getErrorMessage(err)})`);
+        }
+        return () => {
+            for (let i = restoreActions.length - 1; i >= 0; i--) {
+                try {
+                    restoreActions[i]();
+                }
+                catch {
+                    // Ignore restore errors; these are best-effort runtime preferences.
+                }
+            }
+        };
     }
     async isHttp01PortAvailable() {
         return await new Promise(resolve => {
@@ -1204,83 +1242,92 @@ class AcmeAdapter extends utils.Adapter {
                     if (aliasDnsOnlyFlow) {
                         this.log.info('DNS-01 alias configured in DNS-only mode: waiting for CNAME delegation and DNS propagation before continuing the ACME flow.');
                     }
-                    cert = (await this.acmeClient.auto({
-                        csr,
-                        email: this.config.maintainerEmail,
-                        termsOfServiceAgreed: true,
-                        skipChallengeVerification: aliasDnsOnlyFlow,
-                        challengePriority,
-                        challengeCreateFn: async (authz, challenge, keyAuthorization) => {
-                            this.log.debug(`Satisfying challenge ${challenge.type} for ${authz.identifier.value}`);
-                            const handler = this.challenges[challenge.type];
-                            if (!handler) {
-                                throw new Error(`No handler for challenge type ${challenge.type}`);
-                            }
-                            if (challenge.type === 'dns-01') {
-                                if (this.config.dns01Module === 'acme-dns-01-acmedns') {
-                                    const override = this.getCollectionAcmeDnsOverride(collection.id);
-                                    await this.warnIfAcmeDnsDelegationLooksWrong(collection.id, authz, override);
+                    const hasHttp01Targets = this.config.http01Active && hasNonWildcardDomains;
+                    const restoreHttp01NetworkPreference = this.applyHttp01SelfCheckNetworkPreference(hasHttp01Targets);
+                    try {
+                        cert = (await this.acmeClient.auto({
+                            csr,
+                            email: this.config.maintainerEmail,
+                            termsOfServiceAgreed: true,
+                            skipChallengeVerification: aliasDnsOnlyFlow,
+                            challengePriority,
+                            challengeCreateFn: async (authz, challenge, keyAuthorization) => {
+                                this.log.debug(`Satisfying challenge ${challenge.type} for ${authz.identifier.value}`);
+                                const handler = this.challenges[challenge.type];
+                                if (!handler) {
+                                    throw new Error(`No handler for challenge type ${challenge.type}`);
                                 }
-                                const challengeData = await this.buildDnsChallengePayload(handler, authz, challenge, keyAuthorization);
-                                this.dnsChallengeCache[this.getDnsChallengeCacheKey(authz, challenge)] =
-                                    challengeData;
-                                await handler.set(challengeData);
-                                const sourceDnsHost = `_acme-challenge.${authz.identifier.value}`;
-                                const challengeDnsHost = challengeData?.challenge?.dnsHost || challengeData?.dnsHost || sourceDnsHost;
-                                const expectedDnsAuthorization = challengeData?.challenge?.dnsAuthorization;
-                                if (!expectedDnsAuthorization) {
-                                    throw new Error(`Missing dnsAuthorization in challenge payload for ${challengeDnsHost}`);
-                                }
-                                if (challengeDnsHost !== sourceDnsHost) {
-                                    this.log.info(`Waiting for DNS alias delegation of ${sourceDnsHost} to ${challengeDnsHost} before notifying the CA.`);
-                                    await this.waitForDnsAliasDelegation(sourceDnsHost, challengeDnsHost);
-                                    this.log.info(`Waiting for DNS propagation of ${challengeDnsHost} on authoritative resolvers (with system fallback) before notifying the CA.`);
-                                }
-                                else {
-                                    this.log.info(`DNS-01 without alias: waiting for DNS propagation of ${challengeDnsHost} on authoritative resolvers (with system fallback) before notifying the CA.`);
-                                }
-                                await this.waitForDnsPropagation(challengeDnsHost, expectedDnsAuthorization);
-                            }
-                            else {
-                                await this.ensureHttp01ChallengeServerStarted();
-                                const challengeData = {
-                                    identifier: { ...authz.identifier },
-                                    token: challenge.token,
-                                    keyAuthorization,
-                                    challenge: {
-                                        token: challenge.token,
-                                        keyAuthorization,
-                                    },
-                                };
-                                await handler.set(challengeData);
-                            }
-                        },
-                        challengeRemoveFn: async (authz, challenge, keyAuthorization) => {
-                            this.log.debug(`Removing challenge ${challenge.type} for ${authz.identifier.value}`);
-                            const handler = this.challenges[challenge.type];
-                            if (handler) {
                                 if (challenge.type === 'dns-01') {
-                                    const cacheKey = this.getDnsChallengeCacheKey(authz, challenge);
-                                    const cached = this.dnsChallengeCache[cacheKey];
-                                    const removeData = cached ||
-                                        (await this.buildDnsChallengePayload(handler, authz, challenge, keyAuthorization));
-                                    await handler.remove(removeData);
-                                    delete this.dnsChallengeCache[cacheKey];
+                                    if (this.config.dns01Module === 'acme-dns-01-acmedns') {
+                                        const override = this.getCollectionAcmeDnsOverride(collection.id);
+                                        await this.warnIfAcmeDnsDelegationLooksWrong(collection.id, authz, override);
+                                    }
+                                    const challengeData = await this.buildDnsChallengePayload(handler, authz, challenge, keyAuthorization);
+                                    this.dnsChallengeCache[this.getDnsChallengeCacheKey(authz, challenge)] =
+                                        challengeData;
+                                    await handler.set(challengeData);
+                                    const sourceDnsHost = `_acme-challenge.${authz.identifier.value}`;
+                                    const challengeDnsHost = challengeData?.challenge?.dnsHost ||
+                                        challengeData?.dnsHost ||
+                                        sourceDnsHost;
+                                    const expectedDnsAuthorization = challengeData?.challenge?.dnsAuthorization;
+                                    if (!expectedDnsAuthorization) {
+                                        throw new Error(`Missing dnsAuthorization in challenge payload for ${challengeDnsHost}`);
+                                    }
+                                    if (challengeDnsHost !== sourceDnsHost) {
+                                        this.log.info(`Waiting for DNS alias delegation of ${sourceDnsHost} to ${challengeDnsHost} before notifying the CA.`);
+                                        await this.waitForDnsAliasDelegation(sourceDnsHost, challengeDnsHost);
+                                        this.log.info(`Waiting for DNS propagation of ${challengeDnsHost} on authoritative resolvers (with system fallback) before notifying the CA.`);
+                                    }
+                                    else {
+                                        this.log.info(`DNS-01 without alias: waiting for DNS propagation of ${challengeDnsHost} on authoritative resolvers (with system fallback) before notifying the CA.`);
+                                    }
+                                    await this.waitForDnsPropagation(challengeDnsHost, expectedDnsAuthorization);
                                 }
                                 else {
-                                    const removeData = {
+                                    await this.ensureHttp01ChallengeServerStarted();
+                                    const challengeData = {
                                         identifier: { ...authz.identifier },
                                         token: challenge.token,
+                                        keyAuthorization,
                                         challenge: {
                                             token: challenge.token,
                                             keyAuthorization,
                                         },
                                     };
-                                    await handler.remove(removeData);
+                                    await handler.set(challengeData);
                                 }
-                            }
-                        },
-                    })).toString();
+                            },
+                            challengeRemoveFn: async (authz, challenge, keyAuthorization) => {
+                                this.log.debug(`Removing challenge ${challenge.type} for ${authz.identifier.value}`);
+                                const handler = this.challenges[challenge.type];
+                                if (handler) {
+                                    if (challenge.type === 'dns-01') {
+                                        const cacheKey = this.getDnsChallengeCacheKey(authz, challenge);
+                                        const cached = this.dnsChallengeCache[cacheKey];
+                                        const removeData = cached ||
+                                            (await this.buildDnsChallengePayload(handler, authz, challenge, keyAuthorization));
+                                        await handler.remove(removeData);
+                                        delete this.dnsChallengeCache[cacheKey];
+                                    }
+                                    else {
+                                        const removeData = {
+                                            identifier: { ...authz.identifier },
+                                            token: challenge.token,
+                                            challenge: {
+                                                token: challenge.token,
+                                                keyAuthorization,
+                                            },
+                                        };
+                                        await handler.remove(removeData);
+                                    }
+                                }
+                            },
+                        })).toString();
+                    }
+                    finally {
+                        restoreHttp01NetworkPreference();
+                    }
                 }
                 const serverKeyPem = serverKey.toString();
                 // Split bundle: first is leaf, everything is chain
