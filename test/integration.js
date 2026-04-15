@@ -279,7 +279,7 @@ tests.integration(path.join(__dirname, '..'), {
 
                 await configureHttpOnlyCollection(harness, {
                     id: 'normal-enabled',
-                    commonName: 'normal-enabled.example.com',
+                    commonName: 'localhost',
                     port,
                     stopConflicting: true,
                 });
@@ -328,7 +328,7 @@ tests.integration(path.join(__dirname, '..'), {
 
                 await configureHttpOnlyCollection(harness, {
                     id: 'normal-disabled',
-                    commonName: 'normal-disabled.example.com',
+                    commonName: 'localhost',
                     port,
                     stopConflicting: false,
                 });
@@ -380,7 +380,7 @@ tests.integration(path.join(__dirname, '..'), {
 
                     await configureHttpOnlyCollection(harness, {
                         id: 'normal-error',
-                        commonName: 'normal-error.example.com',
+                        commonName: 'localhost',
                         port,
                         stopConflicting: true,
                     });
@@ -402,6 +402,36 @@ tests.integration(path.join(__dirname, '..'), {
                 } finally {
                     await new Promise(resolve => blocker.close(() => resolve()));
                 }
+            });
+        });
+
+        suite('HTTP-01 DNS preflight', getHarness => {
+            let harness;
+
+            before(() => {
+                harness = getHarness();
+            });
+
+            it('aborts early when no A/AAAA record exists for a http-01 domain', async function () {
+                this.timeout(60_000);
+
+                await configureHttpOnlyCollection(harness, {
+                    id: 'missing-dns-http01',
+                    commonName: 'missing-http01-record.invalid',
+                    port: 18085,
+                    stopConflicting: false,
+                });
+
+                await harness.startAdapter(createAcmeMockEnv());
+                await waitForAdapterStop(harness);
+
+                const certsObject = await harness.objects.getObjectAsync('system.certificates');
+                const collections = certsObject?.native?.collections || {};
+                assert.equal(
+                    collections['missing-dns-http01'],
+                    undefined,
+                    'Collection must not be created when HTTP-01 DNS preflight finds no A/AAAA record',
+                );
             });
         });
     },
