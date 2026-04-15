@@ -84,33 +84,12 @@ class AcmeAdapter extends utils.Adapter {
      */
     getActionableCertificateErrorMessage(err) {
         const errorMessage = AcmeAdapter.getErrorMessage(err);
-        const hasNonWildcardHttp01Targets = this.config.http01Active &&
-            this.config.collections.some(collection => {
-                const domains = [collection.commonName, collection.altNames || '']
-                    .join(',')
-                    .split(',')
-                    .map(domain => domain.trim())
-                    .filter(domain => !!domain);
-                return domains.some(domain => !domain.startsWith('*.'));
-            });
-        const http01RoutingHint = hasNonWildcardHttp01Targets
-            ? ` HTTP-01 routing hint: The CA always validates over public port 80. If ACME listens on ${this.config.bind}:${this.config.port}, ensure your router/reverse proxy forwards /.well-known/acme-challenge/ from external port 80 to this configured ACME endpoint.`
-            : '';
-        const appendHint = (message, hint) => {
-            if (!hint) {
-                return message;
-            }
-            const normalizedMessage = message.trimEnd().replace(/[.\s]+$/, '');
-            return `${normalizedMessage}.${hint}`;
-        };
         const stack = err instanceof Error ? err.stack || '' : '';
-        const isHttp502Error = /Request failed with status code 502/.test(errorMessage);
         const acmeClientTransportBug = /Cannot read properties of undefined \(reading 'config'\)/.test(errorMessage) &&
             /acme-client\/src\/axios\.js/.test(stack);
-        const routingHintForError = isHttp502Error ? http01RoutingHint : '';
         if (acmeClientTransportBug) {
             const transportHint = ' ACME transport error: no valid HTTP response was available from the ACME API (often timeout/connection reset/proxy or DNS/network interruption).';
-            return appendHint(errorMessage + transportHint, routingHintForError);
+            return errorMessage + transportHint;
         }
         if (/Cannot read properties of undefined \(reading 'config'\)/.test(errorMessage)) {
             const activeChallenges = [];
@@ -121,9 +100,9 @@ class AcmeAdapter extends utils.Adapter {
                 activeChallenges.push(`DNS-01 (${this.config.dns01Module || 'module not set'})`);
             }
             const activeChallengeInfo = activeChallenges.length > 0 ? activeChallenges.join(', ') : 'none configured';
-            return appendHint(`${errorMessage}. Active challenge setup: ${activeChallengeInfo}. This can be caused by provider module/runtime issues, but also by transport/network timeouts. Verify DNS-01 module selection/credentials and connectivity to the ACME API.`, routingHintForError);
+            return `${errorMessage}. Active challenge setup: ${activeChallengeInfo}. This can be caused by provider module/runtime issues, but also by transport/network timeouts. Verify DNS-01 module selection/credentials and connectivity to the ACME API.`;
         }
-        return appendHint(errorMessage, routingHintForError);
+        return errorMessage;
     }
     constructor(options = {}) {
         super({
