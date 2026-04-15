@@ -104,10 +104,10 @@ class AcmeAdapter extends utils.Adapter {
             return `${normalizedMessage}.${hint}`;
         };
         const stack = err instanceof Error ? err.stack || '' : '';
-        const transportOrNetworkError = /(timed?\s*out|timeout|econnreset|econnrefused|econnaborted|enotfound|eai_again|etimedout|ehostunreach|enetunreach|socket hang up|fetch failed|network error|connection reset|tls|ssl)/i.test(errorMessage);
+        const isHttp502Error = /Request failed with status code 502/.test(errorMessage);
         const acmeClientTransportBug = /Cannot read properties of undefined \(reading 'config'\)/.test(errorMessage) &&
             /acme-client\/src\/axios\.js/.test(stack);
-        const routingHintForError = transportOrNetworkError || acmeClientTransportBug ? http01RoutingHint : '';
+        const routingHintForError = isHttp502Error ? http01RoutingHint : '';
         if (acmeClientTransportBug) {
             const transportHint = ' ACME transport error: no valid HTTP response was available from the ACME API (often timeout/connection reset/proxy or DNS/network interruption).';
             return appendHint(errorMessage + transportHint, routingHintForError);
@@ -537,6 +537,64 @@ class AcmeAdapter extends utils.Adapter {
             }
         };
     }
+    applyHttp01SelfCheckFastFail(enable) {
+        if (!enable || !this.acmeClient) {
+            return () => { };
+        }
+        const client = this.acmeClient;
+        const originalVerifyChallenge = client.verifyChallenge;
+        if (typeof originalVerifyChallenge !== 'function') {
+            return () => { };
+        }
+        let verifyHttp01;
+        let acmeAxios;
+        try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const verifyModule = require('acme-client/src/verify');
+            verifyHttp01 = verifyModule?.['http-01'];
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            acmeAxios = require('acme-client/src/axios');
+        }
+        catch (err) {
+            this.log.debug(`HTTP-01 self-check: fast-fail patch unavailable (${AcmeAdapter.getErrorMessage(err)})`);
+            return () => { };
+        }
+        if (typeof verifyHttp01 !== 'function' || !acmeAxios?.defaults?.acmeSettings) {
+            return () => { };
+        }
+        client.verifyChallenge = async (authz, challenge) => {
+            if (!challenge || challenge.type !== 'http-01') {
+                return originalVerifyChallenge.call(client, authz, challenge);
+            }
+            const previousRetryMaxAttempts = acmeAxios.defaults.acmeSettings.retryMaxAttempts;
+            try {
+                // Fast-fail on HTTP-01 self-check to avoid long retry loops on deterministic proxy misrouting.
+                acmeAxios.defaults.acmeSettings.retryMaxAttempts = 0;
+                const keyAuthorization = await this.acmeClient.getChallengeKeyAuthorization(challenge);
+                return await verifyHttp01(authz, challenge, keyAuthorization);
+            }
+            catch (err) {
+                const message = AcmeAdapter.getErrorMessage(err);
+                if (/Request failed with status code 502/.test(message)) {
+                    throw new Error(`Request failed with status code 502 (HTTP-01 self-check). Reverse proxy/router returned Bad Gateway for /.well-known/acme-challenge/. Verify forwarding from external port 80 to ${this.config.bind}:${this.config.port}.`);
+                }
+                if (/Request failed with status code 404/.test(message)) {
+                    const domain = typeof authz?.identifier?.value === 'string' && authz.identifier.value
+                        ? authz.identifier.value
+                        : 'configured domain';
+                    throw new Error(`Request failed with status code 404 (HTTP-01 self-check). The challenge URL for ${domain} is reachable but does not expose this adapter's challenge token. This usually means A/AAAA DNS records and/or reverse proxy routing point to a different target than ${this.config.bind}:${this.config.port}.`);
+                }
+                throw err;
+            }
+            finally {
+                acmeAxios.defaults.acmeSettings.retryMaxAttempts = previousRetryMaxAttempts;
+            }
+        };
+        this.log.debug('HTTP-01 self-check: fast-fail enabled for local verification');
+        return () => {
+            client.verifyChallenge = originalVerifyChallenge;
+        };
+    }
     async isHttp01PortAvailable() {
         return await new Promise(resolve => {
             const server = node_net_1.default.createServer();
@@ -828,6 +886,46 @@ class AcmeAdapter extends utils.Adapter {
         const code = err?.code;
         return (typeof code === 'string' &&
             ['ETIMEOUT', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH', 'ECONNREFUSED', 'ECONNRESET'].includes(code));
+    }
+    isDnsNoRecordError(err) {
+        const code = err?.code;
+        return typeof code === 'string' && ['ENODATA', 'ENOTFOUND', 'NXDOMAIN', 'NOTFOUND'].includes(code);
+    }
+    async precheckHttp01DnsRecords(domains) {
+        if (!this.config.http01Active) {
+            return;
+        }
+        const http01Domains = Array.from(new Set(domains
+            .filter(domain => !domain.startsWith('*.'))
+            .map(domain => this.normalizeDnsName(domain))
+            .filter(domain => !!domain)));
+        if (!http01Domains.length) {
+            return;
+        }
+        const missingPublicRecords = [];
+        for (const domain of http01Domains) {
+            const [ipv4Result, ipv6Result] = await Promise.allSettled([
+                node_dns_1.promises.resolve4(domain),
+                node_dns_1.promises.resolve6(domain),
+            ]);
+            const hasA = ipv4Result.status === 'fulfilled' && ipv4Result.value.length > 0;
+            const hasAAAA = ipv6Result.status === 'fulfilled' && ipv6Result.value.length > 0;
+            if (hasA || hasAAAA) {
+                continue;
+            }
+            const aNoRecord = ipv4Result.status === 'rejected' && this.isDnsNoRecordError(ipv4Result.reason);
+            const aaaaNoRecord = ipv6Result.status === 'rejected' && this.isDnsNoRecordError(ipv6Result.reason);
+            if (aNoRecord && aaaaNoRecord) {
+                missingPublicRecords.push(domain);
+                continue;
+            }
+            const aReason = ipv4Result.status === 'rejected' ? AcmeAdapter.getErrorMessage(ipv4Result.reason) : 'none';
+            const aaaaReason = ipv6Result.status === 'rejected' ? AcmeAdapter.getErrorMessage(ipv6Result.reason) : 'none';
+            this.log.debug(`HTTP-01 DNS preflight: ${domain} has no resolvable A/AAAA records via local resolver (A error: ${aReason}, AAAA error: ${aaaaReason}). Continuing because this may be a temporary resolver/network issue.`);
+        }
+        if (missingPublicRecords.length > 0) {
+            throw new Error(`HTTP-01 DNS preflight failed: no public A/AAAA record found for ${missingPublicRecords.join(', ')}. Configure at least one A or AAAA record (or disable HTTP-01 for this collection).`);
+        }
     }
     async resolveNsServerAddresses(nsHost) {
         const addresses = new Set();
@@ -1209,6 +1307,8 @@ class AcmeAdapter extends utils.Adapter {
                 if (this.config.http01Active && hasNonWildcardDomains) {
                     this.log.info(`HTTP-01 preflight: validating listener availability on ${this.config.bind}:${this.config.port} before placing order.`);
                     await this.ensureHttp01ChallengeServerStarted();
+                    this.log.info('HTTP-01 preflight: validating public DNS A/AAAA records for challenge domains.');
+                    await this.precheckHttp01DnsRecords(domains);
                 }
                 // Generate CSR
                 const [serverKey, csr] = await acme.crypto.createCsr({
@@ -1243,6 +1343,7 @@ class AcmeAdapter extends utils.Adapter {
                         this.log.info('DNS-01 alias configured in DNS-only mode: waiting for CNAME delegation and DNS propagation before continuing the ACME flow.');
                     }
                     const hasHttp01Targets = this.config.http01Active && hasNonWildcardDomains;
+                    const restoreHttp01FastFail = this.applyHttp01SelfCheckFastFail(hasHttp01Targets);
                     const restoreHttp01NetworkPreference = this.applyHttp01SelfCheckNetworkPreference(hasHttp01Targets);
                     try {
                         cert = (await this.acmeClient.auto({
@@ -1326,6 +1427,7 @@ class AcmeAdapter extends utils.Adapter {
                         })).toString();
                     }
                     finally {
+                        restoreHttp01FastFail();
                         restoreHttp01NetworkPreference();
                     }
                 }
