@@ -104,7 +104,7 @@ class Http01ChallengeServer {
     }
     shutdown() {
         if (!this.server) {
-            this.config.log.warn('Shutdown called but nothing to do');
+            this.config.log.debug('Shutdown called but nothing to do');
         }
         else {
             this.config.log.info('Shutting down challengeServer');
