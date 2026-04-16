@@ -874,7 +874,7 @@ class AcmeAdapter extends utils.Adapter {
     isResolverUnreachableError(err) {
         const code = err?.code;
         return (typeof code === 'string' &&
-            ['ETIMEOUT', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH', 'ECONNREFUSED', 'ECONNRESET'].includes(code));
+            ['ETIMEOUT', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH', 'ECONNREFUSED', 'ECONNRESET', 'EREFUSED'].includes(code));
     }
     isDnsNoRecordError(err) {
         const code = err?.code;
@@ -1144,21 +1144,22 @@ class AcmeAdapter extends utils.Adapter {
     async ensureAcmeDnsDelegationVisible(collectionId, authz) {
         const identifierValue = authz?.identifier?.value;
         if (!identifierValue || typeof identifierValue !== 'string') {
-            return;
+            return null;
         }
         const expectedTarget = this.getAcmeDnsDelegationTargetForCollection(collectionId);
         if (!expectedTarget) {
             this.log.debug(`Collection ${collectionId}: acme-dns delegation target could not be determined from credentials/config. Skipping explicit CNAME precheck.`);
-            return;
+            return null;
         }
         const sourceDnsHost = `_acme-challenge.${identifierValue}`;
         const cacheKey = `${sourceDnsHost}->${expectedTarget}`;
         if (this.acmeDnsCnameCheckedHosts.has(cacheKey)) {
-            return;
+            return expectedTarget;
         }
         this.acmeDnsCnameCheckedHosts.add(cacheKey);
         this.log.info(`Checking DNS alias delegation of ${sourceDnsHost} to ${expectedTarget} before TXT propagation checks.`);
         await this.waitForDnsAliasDelegation(sourceDnsHost, expectedTarget);
+        return expectedTarget;
     }
     async activateCollectionDnsOverride(collectionId) {
         if (!this.config.dns01Active || this.config.dns01Module !== 'acme-dns-01-acmedns') {
@@ -1379,23 +1380,31 @@ class AcmeAdapter extends utils.Adapter {
                                     const challengeDnsHost = challengeData?.challenge?.dnsHost ||
                                         challengeData?.dnsHost ||
                                         sourceDnsHost;
+                                    let propagationDnsHost = challengeDnsHost;
+                                    let delegationAlreadyVerified = false;
                                     if (this.config.dns01Module === 'acme-dns-01-acmedns' &&
                                         challengeDnsHost === sourceDnsHost) {
-                                        await this.ensureAcmeDnsDelegationVisible(collection.id, authz);
+                                        const delegatedDnsHost = await this.ensureAcmeDnsDelegationVisible(collection.id, authz);
+                                        if (delegatedDnsHost) {
+                                            propagationDnsHost = delegatedDnsHost;
+                                            delegationAlreadyVerified = true;
+                                        }
                                     }
                                     const expectedDnsAuthorization = challengeData?.challenge?.dnsAuthorization;
                                     if (!expectedDnsAuthorization) {
                                         throw new Error(`Missing dnsAuthorization in challenge payload for ${challengeDnsHost}`);
                                     }
-                                    if (challengeDnsHost !== sourceDnsHost) {
-                                        this.log.info(`Waiting for DNS alias delegation of ${sourceDnsHost} to ${challengeDnsHost} before notifying the CA.`);
-                                        await this.waitForDnsAliasDelegation(sourceDnsHost, challengeDnsHost);
-                                        this.log.info(`Waiting for DNS propagation of ${challengeDnsHost} on authoritative resolvers (with system fallback) before notifying the CA.`);
+                                    if (propagationDnsHost !== sourceDnsHost) {
+                                        if (!delegationAlreadyVerified) {
+                                            this.log.info(`Waiting for DNS alias delegation of ${sourceDnsHost} to ${propagationDnsHost} before notifying the CA.`);
+                                            await this.waitForDnsAliasDelegation(sourceDnsHost, propagationDnsHost);
+                                        }
+                                        this.log.info(`Waiting for DNS propagation of ${propagationDnsHost} on authoritative resolvers (with system fallback) before notifying the CA.`);
                                     }
                                     else {
-                                        this.log.info(`DNS-01 without alias: waiting for DNS propagation of ${challengeDnsHost} on authoritative resolvers (with system fallback) before notifying the CA.`);
+                                        this.log.info(`DNS-01 without alias: waiting for DNS propagation of ${propagationDnsHost} on authoritative resolvers (with system fallback) before notifying the CA.`);
                                     }
-                                    await this.waitForDnsPropagation(challengeDnsHost, expectedDnsAuthorization);
+                                    await this.waitForDnsPropagation(propagationDnsHost, expectedDnsAuthorization);
                                 }
                                 else {
                                     await this.ensureHttp01ChallengeServerStarted();
