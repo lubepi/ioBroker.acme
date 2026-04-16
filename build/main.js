@@ -564,7 +564,7 @@ class AcmeAdapter extends utils.Adapter {
                 }
                 if (/Request failed with status code 404/.test(message)) {
                     this.log.debug(`HTTP-01 self-check debug: ${domain} returned 404. The request reached an HTTP endpoint, but that path did not expose this adapter's challenge token.`);
-                    throw new Error(`Request failed with status code 404 (HTTP-01 self-check). The challenge URL for ${domain} is reachable but does not expose this adapter's challenge token. This usually means A/AAAA DNS records and/or reverse proxy routing point to a different target than ${this.config.bind}:${this.config.port}.`);
+                    throw new Error(`Request failed with status code 404 (HTTP-01 self-check). The challenge URL for ${domain} is reachable but does not expose this adapter's challenge token. This usually means the domain's A/AAAA DNS records and/or reverse proxy routing point to a different host/backend than the HTTP-01 challenge endpoint.`);
                 }
                 if (/\(resp\.data \|\| ""\)\.replace is not a function/.test(message)) {
                     this.log.debug(`HTTP-01 self-check debug: ${domain} returned a non-text HTTP response.`);
