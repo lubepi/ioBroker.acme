@@ -1053,7 +1053,7 @@ class AcmeAdapter extends utils.Adapter {
 
         if (missingPublicRecords.length > 0) {
             throw new Error(
-                `HTTP-01 DNS preflight failed: no public A/AAAA record found for ${missingPublicRecords.join(', ')}. Configure at least one A or AAAA record (or disable HTTP-01 for this collection).`,
+                `HTTP-01 DNS preflight failed: no public A/AAAA record found for ${missingPublicRecords.join(', ')}. Configure at least one A or AAAA record (or disable HTTP-01 for this collection). The A/AAAA entry is either missing or not yet visible on tested resolvers.`,
             );
         }
     }

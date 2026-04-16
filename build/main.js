@@ -910,7 +910,7 @@ class AcmeAdapter extends utils.Adapter {
             this.log.debug(`HTTP-01 DNS preflight: ${domain} has no resolvable A/AAAA records via local resolver (A error: ${aReason}, AAAA error: ${aaaaReason}). Continuing because this may be a temporary resolver/network issue.`);
         }
         if (missingPublicRecords.length > 0) {
-            throw new Error(`HTTP-01 DNS preflight failed: no public A/AAAA record found for ${missingPublicRecords.join(', ')}. Configure at least one A or AAAA record (or disable HTTP-01 for this collection).`);
+            throw new Error(`HTTP-01 DNS preflight failed: no public A/AAAA record found for ${missingPublicRecords.join(', ')}. Configure at least one A or AAAA record (or disable HTTP-01 for this collection). The A/AAAA entry is either missing or not yet visible on tested resolvers.`);
         }
     }
     async resolveNsServerAddresses(nsHost) {
