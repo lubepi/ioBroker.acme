@@ -570,39 +570,6 @@ class AcmeAdapter extends utils.Adapter {
         };
     }
 
-    private async runHttp01SelfCheckWithDnsOrder<T>(
-        dnsOrder: 'ipv4first' | 'ipv6first',
-        verifyFn: () => Promise<T>,
-    ): Promise<T> {
-        let previousOrder: ReturnType<typeof dns.getDefaultResultOrder> | null = null;
-        let shouldRestoreOrder = false;
-
-        try {
-            previousOrder = dns.getDefaultResultOrder();
-            if (previousOrder !== dnsOrder) {
-                dns.setDefaultResultOrder(dnsOrder);
-                shouldRestoreOrder = true;
-                this.log.debug(`HTTP-01 self-check: temporarily switched DNS result order to ${dnsOrder}`);
-            }
-        } catch (err) {
-            this.log.debug(
-                `HTTP-01 self-check: unable to switch DNS result order to ${dnsOrder} (${AcmeAdapter.getErrorMessage(err)})`,
-            );
-        }
-
-        try {
-            return await verifyFn();
-        } finally {
-            if (shouldRestoreOrder && previousOrder) {
-                try {
-                    dns.setDefaultResultOrder(previousOrder);
-                } catch {
-                    // Ignore restore errors; these are best-effort runtime preferences.
-                }
-            }
-        }
-    }
-
     private applyHttp01SelfCheckFastFail(enable: boolean): () => void {
         if (!enable || !this.acmeClient) {
             return () => {};
@@ -648,73 +615,27 @@ class AcmeAdapter extends utils.Adapter {
                 );
                 acmeAxios.defaults.acmeSettings.retryMaxAttempts = 0;
                 const keyAuthorization = await this.acmeClient!.getChallengeKeyAuthorization(challenge);
-                try {
-                    return await verifyHttp01(authz, challenge, keyAuthorization);
-                } catch (err) {
-                    const primaryMessage = AcmeAdapter.getErrorMessage(err);
-                    const primaryStatusMatch = primaryMessage.match(/Request failed with status code (404|502)/);
-                    const nonTextResponseError = /\(resp\.data \|\| ""\)\.replace is not a function/.test(
-                        primaryMessage,
-                    );
-                    if (!primaryStatusMatch && !nonTextResponseError) {
-                        throw err;
-                    }
-
-                    let currentOrder: ReturnType<typeof dns.getDefaultResultOrder> = 'ipv6first';
-                    try {
-                        currentOrder = dns.getDefaultResultOrder();
-                    } catch {
-                        // Keep default fallback assumption if result order cannot be read.
-                    }
-
-                    const fallbackOrder: 'ipv4first' | 'ipv6first' =
-                        currentOrder === 'ipv4first' ? 'ipv6first' : 'ipv4first';
-                    const primaryReason = primaryStatusMatch
-                        ? `HTTP ${primaryStatusMatch[1]}`
-                        : 'non-text HTTP response body';
-                    this.log.debug(
-                        `HTTP-01 self-check: ${domain} returned ${primaryReason} on primary attempt. Retrying once with ${fallbackOrder} DNS order before failing.`,
-                    );
-
-                    try {
-                        const fallbackResult = await this.runHttp01SelfCheckWithDnsOrder(fallbackOrder, async () =>
-                            verifyHttp01(authz, challenge, keyAuthorization),
-                        );
-                        this.log.info(
-                            `HTTP-01 self-check: ${domain} succeeded on fallback attempt with ${fallbackOrder} DNS order`,
-                        );
-                        return fallbackResult;
-                    } catch (fallbackErr) {
-                        this.log.debug(
-                            `HTTP-01 self-check: fallback attempt for ${domain} with ${fallbackOrder} failed (${AcmeAdapter.getErrorMessage(fallbackErr)})`,
-                        );
-                        throw fallbackErr;
-                    }
-                }
+                return await verifyHttp01(authz, challenge, keyAuthorization);
             } catch (err) {
                 const message = AcmeAdapter.getErrorMessage(err);
                 if (/Request failed with status code 502/.test(message)) {
-                    this.log.debug(
-                        `HTTP-01 self-check debug: ${domain} returned 502 from the proxy/gateway after trying both DNS orders (IPv6-first and IPv4-first).`,
-                    );
+                    this.log.debug(`HTTP-01 self-check debug: ${domain} returned 502 from the proxy/gateway.`);
                     throw new Error(
-                        `Request failed with status code 502 (HTTP-01 self-check). Reverse proxy/router returned Bad Gateway for /.well-known/acme-challenge/ after trying both IPv6-first and IPv4-first DNS order. Verify forwarding from external port 80 to ${this.config.bind}:${this.config.port} for both A and AAAA paths.`,
+                        `Request failed with status code 502 (HTTP-01 self-check). Reverse proxy/router returned Bad Gateway for /.well-known/acme-challenge/. Verify forwarding from external port 80 to ${this.config.bind}:${this.config.port} for published DNS paths.`,
                     );
                 }
                 if (/Request failed with status code 404/.test(message)) {
                     this.log.debug(
-                        `HTTP-01 self-check debug: ${domain} returned 404 after trying both DNS orders (IPv6-first and IPv4-first). The request reached an HTTP endpoint, but that path did not expose this adapter's challenge token.`,
+                        `HTTP-01 self-check debug: ${domain} returned 404. The request reached an HTTP endpoint, but that path did not expose this adapter's challenge token.`,
                     );
                     throw new Error(
-                        `Request failed with status code 404 (HTTP-01 self-check). The challenge URL for ${domain} is reachable but does not expose this adapter's challenge token after trying both IPv6-first and IPv4-first DNS order. This usually means A/AAAA DNS records and/or reverse proxy routing point to a different target than ${this.config.bind}:${this.config.port}.`,
+                        `Request failed with status code 404 (HTTP-01 self-check). The challenge URL for ${domain} is reachable but does not expose this adapter's challenge token. This usually means A/AAAA DNS records and/or reverse proxy routing point to a different target than ${this.config.bind}:${this.config.port}.`,
                     );
                 }
                 if (/\(resp\.data \|\| ""\)\.replace is not a function/.test(message)) {
-                    this.log.debug(
-                        `HTTP-01 self-check debug: ${domain} returned a non-text HTTP response after trying both DNS orders (IPv6-first and IPv4-first).`,
-                    );
+                    this.log.debug(`HTTP-01 self-check debug: ${domain} returned a non-text HTTP response.`);
                     throw new Error(
-                        `HTTP-01 self-check received an unexpected non-text HTTP response for ${domain} after trying both IPv6-first and IPv4-first DNS order. The challenge endpoint must return plain key-authorization text. This usually means /.well-known/acme-challenge/ is served by a different app/router/proxy target than ${this.config.bind}:${this.config.port}.`,
+                        `HTTP-01 self-check received an unexpected non-text HTTP response for ${domain}. The challenge endpoint must return plain key-authorization text. This usually means /.well-known/acme-challenge/ is served by a different app/router/proxy target than ${this.config.bind}:${this.config.port}.`,
                     );
                 }
                 throw err;
