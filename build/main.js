@@ -67,6 +67,7 @@ class AcmeAdapter extends utils.Adapter {
     stoppedAdapters;
     dnsChallengeCache;
     acmeDnsCnameCheckedHosts;
+    acmeDnsAutoRegisteredCollections;
     acmeDnsAutoRegisterBlocked;
     http01ServerReady;
     http01ServerInitPromise;
@@ -118,6 +119,7 @@ class AcmeAdapter extends utils.Adapter {
         this.donePortCheck = false;
         this.dnsChallengeCache = {};
         this.acmeDnsCnameCheckedHosts = new Set();
+        this.acmeDnsAutoRegisteredCollections = new Set();
         this.acmeDnsAutoRegisterBlocked = false;
         this.http01ServerReady = false;
         this.http01ServerInitPromise = null;
@@ -138,6 +140,7 @@ class AcmeAdapter extends utils.Adapter {
                     delete this.dnsChallengeCache[key];
                 }
                 this.acmeDnsCnameCheckedHosts.clear();
+                this.acmeDnsAutoRegisteredCollections.clear();
                 this.http01ServerReady = false;
                 this.http01ServerInitPromise = null;
                 await this.restoreAdaptersOnSamePort();
@@ -1112,44 +1115,50 @@ class AcmeAdapter extends utils.Adapter {
             }
         }
         const message = `Alias delegation not visible: ${sourceRecordName} -> ${targetRecordName}. ` +
-            'The CNAME entry is either missing or not yet visible on tested resolvers.';
+            'The CNAME entry is either missing or not yet visible on tested resolvers. ' +
+            'If you have just created or updated this DNS record, wait a moment for propagation and retry the adapter run.';
         throw new Error(message);
     }
-    async warnIfAcmeDnsDelegationLooksWrong(collectionId, authz, override) {
-        const normalizedDnsAlias = (0, dns_01_utils_1.normalizeDnsAlias)(this.config.dns01Alias);
-        const identifierValue = normalizedDnsAlias || authz?.identifier?.value;
+    getAcmeDnsDelegationTargetForCollection(collectionId) {
+        const override = this.getCollectionAcmeDnsOverride(collectionId);
+        if (override?.fullDomain) {
+            return this.normalizeDnsName(override.fullDomain);
+        }
+        const token = (override?.token || `${this.config.dns01Otoken || ''}`).trim();
+        if (!token) {
+            return null;
+        }
+        const configuredBaseUrl = (override?.baseUrl || `${this.config.dns01ObaseUrl || ''}`).trim();
+        const baseUrl = configuredBaseUrl || 'https://auth.acme-dns.io';
+        try {
+            const host = new URL(baseUrl).hostname;
+            if (!host) {
+                return null;
+            }
+            return this.normalizeDnsName(`${token}.${host}`);
+        }
+        catch {
+            return null;
+        }
+    }
+    async ensureAcmeDnsDelegationVisible(collectionId, authz) {
+        const identifierValue = authz?.identifier?.value;
         if (!identifierValue || typeof identifierValue !== 'string') {
             return;
         }
-        const dnsHost = `_acme-challenge.${identifierValue}`;
-        if (this.acmeDnsCnameCheckedHosts.has(dnsHost)) {
+        const expectedTarget = this.getAcmeDnsDelegationTargetForCollection(collectionId);
+        if (!expectedTarget) {
+            this.log.debug(`Collection ${collectionId}: acme-dns delegation target could not be determined from credentials/config. Skipping explicit CNAME precheck.`);
             return;
         }
-        this.acmeDnsCnameCheckedHosts.add(dnsHost);
-        let cnameTargets = [];
-        try {
-            cnameTargets = await node_dns_1.promises.resolveCname(dnsHost);
-        }
-        catch (err) {
-            const code = typeof err?.code === 'string' ? err.code : '';
-            if (['ENODATA', 'ENOTFOUND', 'ESERVFAIL', 'ETIMEOUT', 'EAI_AGAIN'].includes(code)) {
-                this.log.warn(`Collection ${collectionId}: no DNS CNAME delegation detected for ${dnsHost}. Configure _acme-challenge CNAME before requesting certificates.`);
-                return;
-            }
-            this.log.debug(`Collection ${collectionId}: CNAME precheck for ${dnsHost} failed (${AcmeAdapter.getErrorMessage(err)})`);
+        const sourceDnsHost = `_acme-challenge.${identifierValue}`;
+        const cacheKey = `${sourceDnsHost}->${expectedTarget}`;
+        if (this.acmeDnsCnameCheckedHosts.has(cacheKey)) {
             return;
         }
-        if (!cnameTargets.length) {
-            this.log.warn(`Collection ${collectionId}: no DNS CNAME delegation detected for ${dnsHost}. Configure _acme-challenge CNAME before requesting certificates.`);
-            return;
-        }
-        if (override?.fullDomain) {
-            const expected = this.normalizeDnsName(override.fullDomain);
-            const normalized = cnameTargets.map(target => this.normalizeDnsName(target));
-            if (!normalized.includes(expected)) {
-                this.log.warn(`Collection ${collectionId}: CNAME for ${dnsHost} points to ${cnameTargets.join(', ')}, expected ${override.fullDomain}. Verify delegation target from acme-dns registration.`);
-            }
-        }
+        this.acmeDnsCnameCheckedHosts.add(cacheKey);
+        this.log.info(`Checking DNS alias delegation of ${sourceDnsHost} to ${expectedTarget} before TXT propagation checks.`);
+        await this.waitForDnsAliasDelegation(sourceDnsHost, expectedTarget);
     }
     async activateCollectionDnsOverride(collectionId) {
         if (!this.config.dns01Active || this.config.dns01Module !== 'acme-dns-01-acmedns') {
@@ -1161,9 +1170,11 @@ class AcmeAdapter extends utils.Adapter {
             token: this.config.dns01Otoken,
         });
         let override = this.getCollectionAcmeDnsOverride(collectionId);
+        let autoRegistered = false;
         if (!override && !globalCredentialsReady) {
             this.log.info(`Collection ${collectionId}: no acme-dns credentials configured, trying automatic account registration`);
             override = await this.autoCreateCollectionAcmeDnsOverride(collectionId);
+            autoRegistered = !!override;
         }
         if (!override) {
             return () => undefined;
@@ -1211,6 +1222,9 @@ class AcmeAdapter extends utils.Adapter {
             }
         }
         this.challenges['dns-01'] = overrideHandler;
+        if (autoRegistered) {
+            this.acmeDnsAutoRegisteredCollections.add(collectionId);
+        }
         this.log.info(`Collection ${collectionId}: using dedicated acme-dns override credentials`);
         return () => {
             this.challenges['dns-01'] = previousHandler;
@@ -1287,6 +1301,18 @@ class AcmeAdapter extends utils.Adapter {
                 return;
             }
             const restoreDnsOverride = await this.activateCollectionDnsOverride(collection.id);
+            if (this.acmeDnsAutoRegisteredCollections.has(collection.id)) {
+                const delegationTarget = this.getAcmeDnsDelegationTargetForCollection(collection.id);
+                if (delegationTarget) {
+                    this.log.info(`Collection ${collection.id}: automatic acme-dns registration completed. Configure _acme-challenge CNAME to ${delegationTarget} and start the adapter again.`);
+                }
+                else {
+                    this.log.info(`Collection ${collection.id}: automatic acme-dns registration completed. Configure _acme-challenge CNAME using the generated acme-dns target and start the adapter again.`);
+                }
+                this.log.info(`Collection ${collection.id}: skipping certificate order in this run so DNS delegation can be configured first.`);
+                restoreDnsOverride();
+                return;
+            }
             let cert;
             try {
                 const hasNonWildcardDomains = domains.some(domain => !domain.startsWith('*.'));
@@ -1345,10 +1371,6 @@ class AcmeAdapter extends utils.Adapter {
                                     throw new Error(`No handler for challenge type ${challenge.type}`);
                                 }
                                 if (challenge.type === 'dns-01') {
-                                    if (this.config.dns01Module === 'acme-dns-01-acmedns') {
-                                        const override = this.getCollectionAcmeDnsOverride(collection.id);
-                                        await this.warnIfAcmeDnsDelegationLooksWrong(collection.id, authz, override);
-                                    }
                                     const challengeData = await this.buildDnsChallengePayload(handler, authz, challenge, keyAuthorization);
                                     this.dnsChallengeCache[this.getDnsChallengeCacheKey(authz, challenge)] =
                                         challengeData;
@@ -1357,6 +1379,10 @@ class AcmeAdapter extends utils.Adapter {
                                     const challengeDnsHost = challengeData?.challenge?.dnsHost ||
                                         challengeData?.dnsHost ||
                                         sourceDnsHost;
+                                    if (this.config.dns01Module === 'acme-dns-01-acmedns' &&
+                                        challengeDnsHost === sourceDnsHost) {
+                                        await this.ensureAcmeDnsDelegationVisible(collection.id, authz);
+                                    }
                                     const expectedDnsAuthorization = challengeData?.challenge?.dnsAuthorization;
                                     if (!expectedDnsAuthorization) {
                                         throw new Error(`Missing dnsAuthorization in challenge payload for ${challengeDnsHost}`);
