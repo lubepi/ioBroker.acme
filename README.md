@@ -112,7 +112,7 @@ Example scenarios:
 
 Various DNS-01 challenge plugins are implemented for popular domain hosting platforms.
 
-For DNS-01, the adapter verifies propagation before notifying the CA. The current strategy is authoritative-resolver-first with system-resolver fallback when authoritative resolvers are unavailable. For DNS alias flows, the adapter additionally verifies CNAME delegation before TXT propagation checks.
+For DNS-01, the adapter verifies propagation before notifying the CA using authoritative resolvers. For DNS alias flows, the adapter additionally verifies CNAME delegation before TXT propagation checks.
 
 Available module choices in the adapter UI:
 
@@ -199,7 +199,7 @@ See [acme-client](https://www.npmjs.com/package/acme-client) for implementation 
 - (lubepi) Added DNS-01 Alias support for delegated challenge zones.
 - (lubepi) Added integrated `acme-dns` DNS-01 support in adapter configuration, including per-collection `acme-dns` credentials and automatic `acme-dns` account registration for collections.
 - (lubepi) Added `deSEC` DNS-01 provider support and updated DNS provider dependencies (including `acme-dns-01-netcup` update and `acme-dns-01-route53` removal).
-- (lubepi) Enforced adapter-side DNS-01 propagation checks before CA notification with authoritative-first resolver strategy and system fallback.
+- (lubepi) Enforced adapter-side DNS-01 propagation checks before CA notification with authoritative resolver strategy.
 - (lubepi) Updated `acme-dns-01-netcup` integration to align provider behavior with adapter-side propagation control.
 - (lubepi) Expanded integration tests for DNS alias utilities, safe purge behavior for expired, de-configured collections, and HTTP-01 stop/restore regression coverage.
 - (lubepi) Added HTTP-01 admin option to allow temporary stopping of conflicting adapters on the challenge port.

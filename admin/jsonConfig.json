@@ -171,19 +171,6 @@
           "validatorErrorText": "DNS-01 module is mandatory",
           "validatorNoSaveOnError": true
         },
-        "dns01ObaseUrl": {
-          "newLine": true,
-          "type": "text",
-          "label": "DNS-01 Base URL",
-          "help": "Optional API base URL for custom acme-dns instances. Leave empty to use https://auth.acme-dns.io",
-          "noTranslation": true,
-          "xs": 12,
-          "sm": 12,
-          "md": 12,
-          "lg": 6,
-          "xl": 4,
-          "hidden": "!data.dns01Active || data.dns01Module != 'acme-dns-01-acmedns'"
-        },
         "dns01OcustomerNumber": {
           "newLine": true,
           "type": "text",
@@ -300,7 +287,6 @@
           "type": "table",
           "label": "acme-dns collection credentials",
           "help": "Leave empty for automatic registration on the default server. For custom servers, add a row with collection ID and base URL.",
-          "noTranslation": true,
           "items": [
             {
               "type": "text",

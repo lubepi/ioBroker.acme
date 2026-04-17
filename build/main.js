@@ -42,7 +42,6 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const utils = __importStar(require("@iobroker/adapter-core"));
 const webserver_1 = require("@iobroker/webserver");
 const acme = __importStar(require("acme-client"));
-const node_crypto_1 = __importDefault(require("node:crypto"));
 const node_dns_1 = __importStar(require("node:dns"));
 const node_net_1 = __importDefault(require("node:net"));
 const node_util_1 = require("node:util");
@@ -113,7 +112,7 @@ class AcmeAdapter extends utils.Adapter {
         });
         this.account = {
             full: null,
-            key: null,
+            keyEnc: null,
         };
         this.challenges = {};
         this.toShutdown = [];
@@ -176,6 +175,7 @@ class AcmeAdapter extends utils.Adapter {
                 subdomain: entry?.subdomain ? '***REDACTED***' : entry?.subdomain,
             }));
         }
+        delete safeConfig.dns01CollectionOverrides;
         this.log.debug(`config: ${JSON.stringify(safeConfig)}`);
         acme.setLogger((message) => this.log.debug(`acme-client: ${message}`));
         this.certManager = new webserver_1.CertificateManager({ adapter: this });
@@ -270,10 +270,6 @@ class AcmeAdapter extends utils.Adapter {
                     // An option...
                     dns01Options[key.slice(6)] = value;
                 }
-                else if (key === 'dns01OverifyPropagation' || key === 'dns01PpropagationDelay') {
-                    // Deprecated: handled internally/removed from the public config.
-                    continue;
-                }
                 else if (key.startsWith('dns01P')) {
                     // A property to add after creation
                     dns01Props[key.slice(6)] = value;
@@ -302,6 +298,7 @@ class AcmeAdapter extends utils.Adapter {
             if (this.config.dns01Module === 'acme-dns-01-acmedns') {
                 this.log.info('acme-dns uses per-collection credentials; missing credentials are created automatically during order processing');
                 // Keep a valid handler object for dns-01; real credentials are injected per collection during order processing.
+                delete dns01Options.baseUrl;
                 dns01Options.username = '__auto-register__';
                 dns01Options.password = '__auto-register__';
                 dns01Options.subdomain = '__auto-register__';
@@ -378,7 +375,7 @@ class AcmeAdapter extends utils.Adapter {
                     this.log.info(`Saved account was created for ${native?.useStaging ? 'staging' : 'production'} LE, but current config uses ${this.config.useStaging ? 'staging' : 'production'} — will recreate.`);
                 }
                 else {
-                    if (!savedMaintainerEmail && (native?.full || native?.keyEnc || native?.key)) {
+                    if (!savedMaintainerEmail && (native?.full || native?.keyEnc)) {
                         this.log.debug('Saved account has no maintainerEmail metadata; reusing account and updating metadata.');
                     }
                     this.account = native;
@@ -392,26 +389,7 @@ class AcmeAdapter extends utils.Adapter {
                 }
                 catch (err) {
                     this.log.error(`Failed to decrypt account key: ${AcmeAdapter.getErrorMessage(err)}`);
-                    this.account = { full: null, key: null, keyEnc: null };
-                }
-            }
-            else if (this.account.key) {
-                this.log.debug('Converting legacy account key to PEM...');
-                try {
-                    accountKeyPem = node_crypto_1.default
-                        .createPrivateKey({
-                        key: this.account.key,
-                        format: 'jwk',
-                    })
-                        .export({
-                        type: 'pkcs8',
-                        format: 'pem',
-                    });
-                    accountNeedsSave = true;
-                }
-                catch (err) {
-                    this.log.error(`Failed to convert legacy account key: ${AcmeAdapter.getErrorMessage(err)}`);
-                    this.account = { full: null, key: null };
+                    this.account = { full: null, keyEnc: null };
                 }
             }
             if (!accountKeyPem) {
@@ -425,7 +403,6 @@ class AcmeAdapter extends utils.Adapter {
                 accountUrl: this.account.full?.url,
             });
             // Always call createAccount. It's idempotent and ensures our client has the URL set.
-            // If the account already exists (e.g. legacy acme.js), it will just return the existing data.
             this.log.info('Synchronizing ACME account...');
             const accountUrlBefore = this.account.full?.url;
             this.account.full = await this.acmeClient.createAccount({
@@ -441,7 +418,6 @@ class AcmeAdapter extends utils.Adapter {
                 await this.extendObjectAsync(accountObjectId, {
                     native: {
                         full: this.account.full,
-                        key: null,
                         keyEnc: this.encrypt(accountKeyPem.toString()),
                         maintainerEmail: this.config.maintainerEmail,
                         useStaging: this.config.useStaging,
@@ -824,7 +800,7 @@ class AcmeAdapter extends utils.Adapter {
             this.log.warn(`Collection ${collectionId}: automatic acme-dns registration is temporarily disabled for this run due to previous registration failure`);
             return null;
         }
-        const baseUrl = `${preferredBaseUrl || this.config.dns01ObaseUrl || ''}`.trim();
+        const baseUrl = `${preferredBaseUrl || ''}`.trim();
         try {
             const registration = await (0, dns_01_acmedns_1.registerAcmeDnsAccount)(baseUrl || undefined);
             const credentials = {
@@ -1054,51 +1030,33 @@ class AcmeAdapter extends utils.Adapter {
     async waitForDnsPropagation(recordName, expectedValue) {
         const waitForMs = 5000;
         const maxAttempts = 240;
-        const systemResolver = new node_dns_1.promises.Resolver();
         const authoritativeResolvers = await this.getAuthoritativeResolvers(recordName);
-        if (authoritativeResolvers.length > 0) {
-            this.log.debug(`Using authoritative DNS resolvers for propagation check of ${recordName}: ${authoritativeResolvers
-                .map(entry => entry.name)
-                .join(', ')}`);
+        if (authoritativeResolvers.length === 0) {
+            throw new Error(`No authoritative DNS resolver could be determined for ${recordName}`);
         }
-        else {
-            this.log.warn(`No authoritative DNS resolver could be determined for ${recordName}. Falling back to system resolver checks.`);
-        }
+        this.log.debug(`Using authoritative DNS resolvers for propagation check of ${recordName}: ${authoritativeResolvers
+            .map(entry => entry.name)
+            .join(', ')}`);
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-            if (authoritativeResolvers.length > 0) {
-                const checks = await Promise.all(authoritativeResolvers.map(async ({ name, resolver }) => {
-                    const result = await this.resolveTxtViaResolver(resolver, recordName);
-                    return {
-                        name,
-                        reachable: result.reachable,
-                        ok: result.values.includes(expectedValue),
-                    };
-                }));
-                const reachableChecks = checks.filter(check => check.reachable);
-                const okResolvers = reachableChecks.filter(check => check.ok).map(check => check.name);
-                if (reachableChecks.length > 0 && okResolvers.length === reachableChecks.length) {
-                    this.log.info(`DNS propagation verified for ${recordName} on all reachable authoritative resolvers (${okResolvers.join(', ')}).`);
-                    return;
-                }
-                if (reachableChecks.length > 0) {
-                    this.log.debug(`DNS propagation not yet complete for ${recordName} on authoritative resolvers. Visible on ${okResolvers.length}/${reachableChecks.length} reachable authoritative resolvers. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`);
-                }
-                else {
-                    const fallback = await this.resolveTxtViaResolver(systemResolver, recordName);
-                    if (fallback.values.includes(expectedValue)) {
-                        this.log.info(`DNS propagation verified for ${recordName} via system resolver fallback (authoritative resolvers not reachable).`);
-                        return;
-                    }
-                    this.log.debug(`Authoritative resolvers for ${recordName} were not reachable and system resolver fallback does not see TXT yet. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`);
-                }
+            const checks = await Promise.all(authoritativeResolvers.map(async ({ name, resolver }) => {
+                const result = await this.resolveTxtViaResolver(resolver, recordName);
+                return {
+                    name,
+                    reachable: result.reachable,
+                    ok: result.values.includes(expectedValue),
+                };
+            }));
+            const reachableChecks = checks.filter(check => check.reachable);
+            const okResolvers = reachableChecks.filter(check => check.ok).map(check => check.name);
+            if (reachableChecks.length > 0 && okResolvers.length === reachableChecks.length) {
+                this.log.info(`DNS propagation verified for ${recordName} on all reachable authoritative resolvers (${okResolvers.join(', ')}).`);
+                return;
+            }
+            if (reachableChecks.length > 0) {
+                this.log.debug(`DNS propagation not yet complete for ${recordName} on authoritative resolvers. Visible on ${okResolvers.length}/${reachableChecks.length} reachable authoritative resolvers. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`);
             }
             else {
-                const fallback = await this.resolveTxtViaResolver(systemResolver, recordName);
-                if (fallback.values.includes(expectedValue)) {
-                    this.log.info(`DNS propagation verified for ${recordName} via system resolver.`);
-                    return;
-                }
-                this.log.debug(`DNS propagation not yet complete for ${recordName} via system resolver. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`);
+                this.log.debug(`Authoritative resolvers for ${recordName} are currently not reachable. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`);
             }
             if (attempt < maxAttempts) {
                 await new Promise(resolve => setTimeout(resolve, waitForMs));
@@ -1110,41 +1068,32 @@ class AcmeAdapter extends utils.Adapter {
         const waitForMs = 5000;
         const maxAttempts = 3;
         const normalizedTarget = this.normalizeDnsName(targetRecordName);
-        const systemResolver = new node_dns_1.promises.Resolver();
         const authoritativeResolvers = await this.getAuthoritativeResolvers(sourceRecordName);
+        if (authoritativeResolvers.length === 0) {
+            throw new Error(`No authoritative DNS resolver could be determined for ${sourceRecordName}`);
+        }
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-            if (authoritativeResolvers.length > 0) {
-                const checks = await Promise.all(authoritativeResolvers.map(async ({ name, resolver }) => {
-                    const result = await this.resolveCnameViaResolver(resolver, sourceRecordName);
-                    const ok = result.values.some(record => this.normalizeDnsName(record) === normalizedTarget);
-                    return {
-                        name,
-                        reachable: result.reachable,
-                        ok,
-                    };
-                }));
-                const reachableChecks = checks.filter(check => check.reachable);
-                const ready = reachableChecks.find(check => check.ok);
-                if (ready && reachableChecks.every(check => check.ok)) {
-                    this.log.info(`DNS alias delegation verified for ${sourceRecordName} -> ${targetRecordName} on all reachable authoritative resolvers.`);
-                    return;
-                }
-                if (reachableChecks.length === 0) {
-                    const fallback = await this.resolveCnameViaResolver(systemResolver, sourceRecordName);
-                    if (fallback.values.some(record => this.normalizeDnsName(record) === normalizedTarget)) {
-                        this.log.info(`DNS alias delegation verified for ${sourceRecordName} -> ${targetRecordName} via system resolver fallback (authoritative resolvers not reachable).`);
-                        return;
-                    }
-                }
+            const checks = await Promise.all(authoritativeResolvers.map(async ({ name, resolver }) => {
+                const result = await this.resolveCnameViaResolver(resolver, sourceRecordName);
+                const ok = result.values.some(record => this.normalizeDnsName(record) === normalizedTarget);
+                return {
+                    name,
+                    reachable: result.reachable,
+                    ok,
+                };
+            }));
+            const reachableChecks = checks.filter(check => check.reachable);
+            const okCount = reachableChecks.filter(check => check.ok).length;
+            if (reachableChecks.length > 0 && okCount === reachableChecks.length) {
+                this.log.info(`DNS alias delegation verified for ${sourceRecordName} -> ${targetRecordName} on all reachable authoritative resolvers.`);
+                return;
+            }
+            if (reachableChecks.length > 0) {
+                this.log.debug(`DNS alias delegation not yet visible for ${sourceRecordName} -> ${targetRecordName}. Visible on ${okCount}/${reachableChecks.length} reachable authoritative resolvers. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`);
             }
             else {
-                const fallback = await this.resolveCnameViaResolver(systemResolver, sourceRecordName);
-                if (fallback.values.some(record => this.normalizeDnsName(record) === normalizedTarget)) {
-                    this.log.info(`DNS alias delegation verified for ${sourceRecordName} -> ${targetRecordName} via system resolver.`);
-                    return;
-                }
+                this.log.debug(`Authoritative resolvers for ${sourceRecordName} are currently not reachable. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`);
             }
-            this.log.debug(`DNS alias delegation not yet visible for ${sourceRecordName} -> ${targetRecordName}. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`);
             if (attempt < maxAttempts) {
                 await new Promise(resolve => setTimeout(resolve, waitForMs));
             }
@@ -1163,8 +1112,7 @@ class AcmeAdapter extends utils.Adapter {
         if (!token) {
             return null;
         }
-        const configuredBaseUrl = (credential?.baseUrl || `${this.config.dns01ObaseUrl || ''}`).trim();
-        const baseUrl = configuredBaseUrl || 'https://auth.acme-dns.io';
+        const baseUrl = `${credential?.baseUrl || ''}`.trim() || 'https://auth.acme-dns.io';
         try {
             const host = new URL(baseUrl).hostname;
             if (!host) {
@@ -1223,6 +1171,7 @@ class AcmeAdapter extends utils.Adapter {
                 dns01Options[key.slice(6)] = value;
             }
         }
+        delete dns01Options.baseUrl;
         dns01Options.username = credentials.username;
         dns01Options.password = credentials.password;
         dns01Options.subdomain = credentials.subdomain;
@@ -1437,10 +1386,10 @@ class AcmeAdapter extends utils.Adapter {
                                             this.log.info(`Waiting for DNS alias delegation of ${sourceDnsHost} to ${propagationDnsHost} before notifying the CA.`);
                                             await this.waitForDnsAliasDelegation(sourceDnsHost, propagationDnsHost);
                                         }
-                                        this.log.info(`Waiting for DNS propagation of ${propagationDnsHost} on authoritative resolvers (with system fallback) before notifying the CA.`);
+                                        this.log.info(`Waiting for DNS propagation of ${propagationDnsHost} on authoritative resolvers before notifying the CA.`);
                                     }
                                     else {
-                                        this.log.info(`DNS-01 without alias: waiting for DNS propagation of ${propagationDnsHost} on authoritative resolvers (with system fallback) before notifying the CA.`);
+                                        this.log.info(`DNS-01 without alias: waiting for DNS propagation of ${propagationDnsHost} on authoritative resolvers before notifying the CA.`);
                                     }
                                     await this.waitForDnsPropagation(propagationDnsHost, expectedDnsAuthorization);
                                 }

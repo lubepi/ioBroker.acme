@@ -33,7 +33,6 @@ export interface AcmeAdapterConfig {
         | 'acme-dns-01-netcup';
     dns01OapiUser: string;
     dns01OapiKey: string;
-    dns01ObaseUrl: string;
     dns01OclientIp: string;
     dns01Okey: string;
     dns01Osecret: string;
