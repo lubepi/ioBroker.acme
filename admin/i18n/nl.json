@@ -1,6 +1,6 @@
 {
     "acme-dns": "acme-dns",
-    "acme-dns collection overrides": "acme-dns-verzameling overschrijft",
+    "acme-dns collection credentials": "acme-dns-verzamelingsgegevens",
     "Activate DNS-01 challenge verification. Mandatory for wildcard certificates. Normal domains only use DNS-01 if HTTP-01 is disabled above.": "Schakel DNS-01-challengeverificatie in. Verplicht voor wildcardcertificaten. Normale domeinen gebruiken DNS-01 alleen als HTTP-01 hierboven is uitgeschakeld.",
     "Activate HTTP-01 challenge verification. For normal domains (no wildcards), this takes priority over DNS-01. Wildcards always use DNS-01. No automatic fallback on failure.": "Schakel HTTP-01-challengeverificatie in. Voor normale domeinen (geen wildcards) heeft dit prioriteit boven DNS-01. Wildcards gebruiken altijd DNS-01. Geen automatische fallback bij fouten.",
     "Allow ACME to stop conflicting adapters on HTTP-01 port": "Sta ACME toe conflicterende adapters op de HTTP-01-poort te stoppen",
@@ -9,7 +9,6 @@
     "Base URL (optional)": "Basis-URL (optioneel)",
     "Challenges": "Challenges",
     "CloudFlare": "WolkFlare",
-    "CNAME target (auto)": "CNAME-doel (automatisch)",
     "Collection ID": "Collectie-ID",
     "Collections": "Collecties",
     "Common name": "Gemeenschappelijke naam",
@@ -50,15 +49,16 @@
     "Netcup": "Netbeker",
     "Optional API base URL for custom acme-dns instances. Leave empty to use https://auth.acme-dns.io": "Optionele API-basis-URL voor aangepaste acme-dns-instanties. Laat leeg om https://auth.acme-dns.io te gebruiken",
     "Optional delegation alias for providers where the adapter writes TXT records directly (for example deSEC or DuckDNS). Enter only the domain, without _acme-challenge.": "Optionele delegatiealias voor providers waarbij de adapter rechtstreeks TXT-records schrijft (bijvoorbeeld deSEC of DuckDNS). Voer alleen het domein in, zonder _acme-challenge.",
-    "Optional: Override acme-dns credentials per collection ID. Requires DNS-01 module 'acme-dns (CNAME delegation)'.": "Optioneel: overschrijf acme-dns-referenties per collectie-ID. Vereist DNS-01-module 'acme-dns (CNAME-delegatie)'.",
-    "Secret (X-Api-Key)": "Geheim (X-Api-sleutel)",
+    "Leave empty for automatic registration on the default server. For custom servers, add a row with collection ID and base URL.": "Laat leeg voor automatische registratie op de standaardserver. Voor aangepaste servers voegt u een rij toe met collectie-ID en basis-URL.",
     "Status": "Status",
     "Todo!": "Te doen!",
-    "Token (subdomain)": "Token (subdomein)",
     "Use DNS-01 challenges": "Gebruik DNS-01-challenges",
     "Use HTTP-01 challenges": "Gebruik HTTP-01-challenges",
     "Use staging server": "Gebruik staging-server",
     "Useful for testing/challenge verification purposes.": "Handig voor test-/uitdagingsverificatiedoeleinden.",
-    "Username (X-Api-User)": "Gebruikersnaam (X-Api-gebruiker)",
-    "Vultr": "Vultr"
+    "Vultr": "Vultr",
+    "Username": "Gebruikersnaam",
+    "Password": "Wachtwoord",
+    "Subdomain": "Subdomein",
+    "CNAME target (fulldomain)": "CNAME-doel (fulldomain)"
 }

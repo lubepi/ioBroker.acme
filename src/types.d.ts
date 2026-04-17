@@ -42,11 +42,11 @@ export interface AcmeAdapterConfig {
     dns01OcustomerNumber: string;
     dns01OapiPassword: string;
     dns01Alias: string;
-    dns01CollectionOverrides: Array<{
+    dns01CollectionCredentials: Array<{
         collectionId: string;
         username: string;
-        secret: string;
-        token: string;
+        password?: string;
+        subdomain?: string;
         baseUrl: string;
         fullDomain?: string;
     }>;

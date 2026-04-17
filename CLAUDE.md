@@ -62,7 +62,7 @@ npm run release        # Interactive release via @alcalzone/release-script
 
 ### Configuration
 - `admin/jsonConfig.json` — Declarative admin UI (tabs: Main, Challenges, Collections, Status). This is the primary config UI definition.
-- `io-package.json` — ioBroker adapter metadata. Mode is `schedule`. Encrypted native fields: `dns01Okey`, `dns01Osecret`, `dns01Otoken`, `dns01OapiKey`, `dns01OapiPassword`, `dns01CollectionOverrides`.
+- `io-package.json` — ioBroker adapter metadata. Mode is `schedule`. Encrypted native fields: `dns01Okey`, `dns01Osecret`, `dns01Otoken`, `dns01OapiKey`, `dns01OapiPassword`, `dns01CollectionCredentials`.
 
 ### Key adapter behaviors
 - Runs as a scheduled adapter (not daemon) — executes, processes certificates, then exits.

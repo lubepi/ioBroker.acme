@@ -1,6 +1,6 @@
 {
     "acme-dns": "acme-dns",
-    "acme-dns collection overrides": "acme-dns 集合覆盖",
+    "acme-dns collection credentials": "acme-dns 集合凭据",
     "Activate DNS-01 challenge verification. Mandatory for wildcard certificates. Normal domains only use DNS-01 if HTTP-01 is disabled above.": "启用 DNS-01 质询验证。通配符证书必须使用该方式。普通域名仅在上方禁用 HTTP-01 时才使用 DNS-01。",
     "Activate HTTP-01 challenge verification. For normal domains (no wildcards), this takes priority over DNS-01. Wildcards always use DNS-01. No automatic fallback on failure.": "启用 HTTP-01 质询验证。对于普通域名（非通配符），其优先级高于 DNS-01。通配符始终使用 DNS-01。失败时不会自动回退。",
     "Allow ACME to stop conflicting adapters on HTTP-01 port": "允许 ACME 停止 HTTP-01 端口上的冲突适配器",
@@ -9,7 +9,6 @@
     "Base URL (optional)": "基本 URL（可选）",
     "Challenges": "Challenges",
     "CloudFlare": "云耀光",
-    "CNAME target (auto)": "CNAME 目标（自动）",
     "Collection ID": "集合ID",
     "Collections": "收藏品",
     "Common name": "常用名",
@@ -50,15 +49,16 @@
     "Netcup": "网杯",
     "Optional API base URL for custom acme-dns instances. Leave empty to use https://auth.acme-dns.io": "自定义 acme-dns 实例的可选 API 基本 URL。留空以使用 https://auth.acme-dns.io",
     "Optional delegation alias for providers where the adapter writes TXT records directly (for example deSEC or DuckDNS). Enter only the domain, without _acme-challenge.": "适配器直接写入 TXT 记录的提供商的可选委托别名（例如 deSEC 或 DuckDNS）。仅输入域名，不输入 _acme-challenge。",
-    "Optional: Override acme-dns credentials per collection ID. Requires DNS-01 module 'acme-dns (CNAME delegation)'.": "可选：覆盖每个集合 ID 的 acme-dns 凭据。需要 DNS-01 模块“acme-dns（CNAME 委托）”。",
-    "Secret (X-Api-Key)": "秘密（X-Api-Key）",
+    "Leave empty for automatic registration on the default server. For custom servers, add a row with collection ID and base URL.": "默认服务器的自动注册请留空。自定义服务器请添加一行并设置集合 ID 与基础 URL。",
     "Status": "Status",
     "Todo!": "去做！",
-    "Token (subdomain)": "令牌（子域）",
     "Use DNS-01 challenges": "使用 DNS-01 挑战",
     "Use HTTP-01 challenges": "使用 HTTP-01 质询",
     "Use staging server": "使用登台服务器",
     "Useful for testing/challenge verification purposes.": "用于测试/挑战验证目的。",
-    "Username (X-Api-User)": "用户名（X-Api-用户）",
-    "Vultr": "乌尔特尔"
+    "Vultr": "乌尔特尔",
+    "Username": "用户名",
+    "Password": "密码",
+    "Subdomain": "子域",
+    "CNAME target (fulldomain)": "CNAME 目标 (fulldomain)"
 }

@@ -175,18 +175,17 @@ Use this if your domain is at a provider like Strato, Hetzner, or Route 53, and 
 Use this if you want isolated or self-hosted DNS-01 handling.
 
 1. Choose one of these modes:
-    - Manual mode: Create a free acme-dns account and set the credentials in the configuration.
-    - Automatic mode: leave global credentials empty. The adapter registers acme-dns accounts per collection and stores credentials in `acme-dns collection overrides`.
-2. In your **primary DNS provider**, add a `CNAME` record:
+    - Manual mode: Use an existing acme-dns server (self-hosted, another custom server, or `https://auth.acme-dns.io`), create the account via its `/register` API endpoint, and set the returned credentials in `acme-dns collection credentials` for each collection. acme-dns does not provide a central sign-up website like deSEC.
+    - Automatic mode: the adapter creates (missing) collection credentials automatically. For the default server (`https://auth.acme-dns.io`), do not create a credentials row. For custom servers, create a row with `collectionId` and `baseUrl` (leave username/password/subdomain empty).
+2. For automatic mode only, run the adapter once so it can create the acme-dns account and store the collection credentials.
+3. In your **primary DNS provider**, add a `CNAME` record:
     - **Name:** `_acme-challenge` (or `_acme-challenge.subdomain` for subdomains)
-    - **Target:** the acme-dns target hostname returned by the account
-3. Optional: set `DNS-01 Base URL` for self-hosted acme-dns. If empty, `https://auth.acme-dns.io` is used.
+    - **Target:** for automatic mode: the `CNAME target` returned by the first adapter run. For manual mode: the `fulldomain` returned by the acme-dns registration API.
+4. Run the adapter (again) so it can use the new delegation and complete the certificate order.
 
 Notes:
-- Use only one domain per collection, as acme-dns provides only one TXT target per account. Since this adapter's underlying library (acme-client) processes authorizations in parallel, combining multiple domains in a single collection may be unreliable. For privilege isolation, use a dedicated acme-dns account per collection.
+- Use only one domain per collection, as acme-dns (and DuckDNS) provides only one TXT target per account. Since this adapter's underlying library (acme-client) processes authorizations in parallel, combining multiple domains in a single collection may be unreliable. Consequently, this adapter aborts early with a warning when multiple DNS-01 domains are detected. For privilege isolation, use a dedicated acme-dns account per collection.
 - The adapter performs a DNS CNAME precheck and warns if delegation looks missing or mismatched.
-- In DNS-only alias flows, missing alias delegation is treated as a hard precondition and the request is aborted early with a clear warning.
-- In automatic mode, the `CNAME target (auto)` column shows the target returned by acme-dns registration.
 
 #### References
 
@@ -198,7 +197,7 @@ See [acme-client](https://www.npmjs.com/package/acme-client) for implementation 
 
 - (lubepi) Migration from `acme` to `acme-client`, including hardened account/order handling (`processing`/`valid` flows) and improved challenge lifecycle handling.
 - (lubepi) Added DNS-01 Alias support for delegated challenge zones.
-- (lubepi) Added integrated `acme-dns` DNS-01 support in adapter configuration, including optional per-collection `acme-dns` overrides and automatic `acme-dns` account registration when global credentials are not set.
+- (lubepi) Added integrated `acme-dns` DNS-01 support in adapter configuration, including per-collection `acme-dns` credentials and automatic `acme-dns` account registration for collections.
 - (lubepi) Added `deSEC` DNS-01 provider support and updated DNS provider dependencies (including `acme-dns-01-netcup` update and `acme-dns-01-route53` removal).
 - (lubepi) Enforced adapter-side DNS-01 propagation checks before CA notification with authoritative-first resolver strategy and system fallback.
 - (lubepi) Updated `acme-dns-01-netcup` integration to align provider behavior with adapter-side propagation control.
