@@ -1030,47 +1030,105 @@ class AcmeAdapter extends utils.Adapter {
     async waitForDnsPropagation(recordName, expectedValue) {
         const waitForMs = 5000;
         const maxAttempts = 240;
+        const authoritativeReachabilityAttempts = 3;
+        const systemResolverMaxAttempts = 360;
+        const systemResolverReachabilityAttempts = 3;
         const authoritativeResolvers = await this.getAuthoritativeResolvers(recordName);
-        if (authoritativeResolvers.length === 0) {
-            throw new Error(`No authoritative DNS resolver could be determined for ${recordName}`);
+        let authoritativeHadReachableResolver = false;
+        let useSystemResolverFallback = authoritativeResolvers.length === 0;
+        let consecutiveUnreachableAuthoritativeAttempts = 0;
+        if (authoritativeResolvers.length > 0) {
+            this.log.debug(`Using authoritative DNS resolvers for propagation check of ${recordName}: ${authoritativeResolvers
+                .map(entry => entry.name)
+                .join(', ')}`);
         }
-        this.log.debug(`Using authoritative DNS resolvers for propagation check of ${recordName}: ${authoritativeResolvers
-            .map(entry => entry.name)
-            .join(', ')}`);
-        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-            const checks = await Promise.all(authoritativeResolvers.map(async ({ name, resolver }) => {
-                const result = await this.resolveTxtViaResolver(resolver, recordName);
-                return {
-                    name,
-                    reachable: result.reachable,
-                    ok: result.values.includes(expectedValue),
-                };
-            }));
-            const reachableChecks = checks.filter(check => check.reachable);
-            const okResolvers = reachableChecks.filter(check => check.ok).map(check => check.name);
-            if (reachableChecks.length > 0 && okResolvers.length === reachableChecks.length) {
-                this.log.info(`DNS propagation verified for ${recordName} on all reachable authoritative resolvers (${okResolvers.join(', ')}).`);
+        else {
+            this.log.warn(`No authoritative DNS resolver could be determined for ${recordName}. Falling back to system resolver checks.`);
+        }
+        if (!useSystemResolverFallback) {
+            for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+                const checks = await Promise.all(authoritativeResolvers.map(async ({ name, resolver }) => {
+                    const result = await this.resolveTxtViaResolver(resolver, recordName);
+                    return {
+                        name,
+                        reachable: result.reachable,
+                        ok: result.values.includes(expectedValue),
+                    };
+                }));
+                const reachableChecks = checks.filter(check => check.reachable);
+                const okResolvers = reachableChecks.filter(check => check.ok).map(check => check.name);
+                if (reachableChecks.length > 0) {
+                    authoritativeHadReachableResolver = true;
+                    consecutiveUnreachableAuthoritativeAttempts = 0;
+                }
+                else {
+                    consecutiveUnreachableAuthoritativeAttempts += 1;
+                }
+                if (reachableChecks.length > 0 && okResolvers.length === reachableChecks.length) {
+                    this.log.info(`DNS propagation verified for ${recordName} on all reachable authoritative resolvers (${okResolvers.join(', ')}).`);
+                    return;
+                }
+                if (reachableChecks.length > 0) {
+                    this.log.debug(`DNS propagation not yet complete for ${recordName} on authoritative resolvers. Visible on ${okResolvers.length}/${reachableChecks.length} reachable authoritative resolvers. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`);
+                }
+                else {
+                    this.log.debug(`Authoritative resolvers for ${recordName} are currently not reachable. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`);
+                }
+                if (!authoritativeHadReachableResolver &&
+                    consecutiveUnreachableAuthoritativeAttempts >= authoritativeReachabilityAttempts) {
+                    useSystemResolverFallback = true;
+                    this.log.warn(`Authoritative resolvers for ${recordName} were unreachable for ${authoritativeReachabilityAttempts} consecutive attempts. Switching early to system resolver fallback.`);
+                    break;
+                }
+                if (attempt < maxAttempts) {
+                    await new Promise(resolve => setTimeout(resolve, waitForMs));
+                }
+            }
+        }
+        if (!useSystemResolverFallback && authoritativeHadReachableResolver) {
+            throw new Error(`Timed out waiting for DNS propagation of ${recordName}`);
+        }
+        if (!useSystemResolverFallback) {
+            useSystemResolverFallback = true;
+        }
+        this.log.warn(`All authoritative DNS resolvers for ${recordName} were unreachable or refused queries. Falling back to system resolver checks; results can be delayed by recursive DNS caching and are less deterministic.`);
+        const systemResolver = new node_dns_1.promises.Resolver();
+        let systemResolverHadReachableResult = false;
+        for (let attempt = 1; attempt <= systemResolverMaxAttempts; attempt += 1) {
+            const result = await this.resolveTxtViaResolver(systemResolver, recordName);
+            const ok = result.values.includes(expectedValue);
+            if (result.reachable) {
+                systemResolverHadReachableResult = true;
+            }
+            if (result.reachable && ok) {
+                this.log.info(`DNS propagation verified for ${recordName} via system resolver fallback.`);
                 return;
             }
-            if (reachableChecks.length > 0) {
-                this.log.debug(`DNS propagation not yet complete for ${recordName} on authoritative resolvers. Visible on ${okResolvers.length}/${reachableChecks.length} reachable authoritative resolvers. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`);
+            if (!systemResolverHadReachableResult && attempt >= systemResolverReachabilityAttempts) {
+                throw new Error(`System DNS resolver is not reachable for ${recordName}. Aborting challenge because local DNS resolution is unavailable.`);
+            }
+            if (result.reachable) {
+                this.log.debug(`System resolver fallback does not yet see expected TXT value for ${recordName}. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${systemResolverMaxAttempts})`);
             }
             else {
-                this.log.debug(`Authoritative resolvers for ${recordName} are currently not reachable. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${maxAttempts})`);
+                this.log.debug(`System resolver for ${recordName} is currently not reachable. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${systemResolverMaxAttempts})`);
             }
-            if (attempt < maxAttempts) {
+            if (attempt < systemResolverMaxAttempts) {
                 await new Promise(resolve => setTimeout(resolve, waitForMs));
             }
         }
-        throw new Error(`Timed out waiting for DNS propagation of ${recordName}`);
+        this.log.warn(`System resolver fallback timed out while waiting for DNS propagation of ${recordName}. Proceeding with ACME challenge anyway (best effort).`);
     }
     async waitForDnsAliasDelegation(sourceRecordName, targetRecordName) {
         const waitForMs = 5000;
         const maxAttempts = 3;
+        const systemResolverMaxAttempts = 360;
+        const systemResolverReachabilityAttempts = 3;
         const normalizedTarget = this.normalizeDnsName(targetRecordName);
         const authoritativeResolvers = await this.getAuthoritativeResolvers(sourceRecordName);
+        let authoritativeHadReachableResolver = false;
         if (authoritativeResolvers.length === 0) {
-            throw new Error(`No authoritative DNS resolver could be determined for ${sourceRecordName}`);
+            this.log.warn(`No authoritative DNS resolver could be determined for ${sourceRecordName}. Falling back to system resolver checks for alias delegation.`);
         }
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
             const checks = await Promise.all(authoritativeResolvers.map(async ({ name, resolver }) => {
@@ -1083,6 +1141,9 @@ class AcmeAdapter extends utils.Adapter {
                 };
             }));
             const reachableChecks = checks.filter(check => check.reachable);
+            if (reachableChecks.length > 0) {
+                authoritativeHadReachableResolver = true;
+            }
             const okCount = reachableChecks.filter(check => check.ok).length;
             if (reachableChecks.length > 0 && okCount === reachableChecks.length) {
                 this.log.info(`DNS alias delegation verified for ${sourceRecordName} -> ${targetRecordName} on all reachable authoritative resolvers.`);
@@ -1098,10 +1159,39 @@ class AcmeAdapter extends utils.Adapter {
                 await new Promise(resolve => setTimeout(resolve, waitForMs));
             }
         }
-        const message = `Alias delegation not visible: ${sourceRecordName} -> ${targetRecordName}. ` +
-            'The CNAME entry is either missing or not yet visible on tested resolvers. ' +
-            'If you have just created or updated this DNS record, wait a moment for propagation and retry the adapter run.';
-        throw new Error(message);
+        if (authoritativeHadReachableResolver) {
+            const message = `Alias delegation not visible: ${sourceRecordName} -> ${targetRecordName}. ` +
+                'The CNAME entry is either missing or not yet visible on tested resolvers. ' +
+                'If you have just created or updated this DNS record, wait a moment for propagation and retry the adapter run.';
+            throw new Error(message);
+        }
+        this.log.warn(`All authoritative DNS resolvers for ${sourceRecordName} were unreachable or refused queries. Falling back to system resolver checks for alias delegation; results can be delayed by recursive DNS caching and are less deterministic.`);
+        const systemResolver = new node_dns_1.promises.Resolver();
+        let systemResolverHadReachableResult = false;
+        for (let attempt = 1; attempt <= systemResolverMaxAttempts; attempt += 1) {
+            const result = await this.resolveCnameViaResolver(systemResolver, sourceRecordName);
+            const ok = result.values.some(record => this.normalizeDnsName(record) === normalizedTarget);
+            if (result.reachable) {
+                systemResolverHadReachableResult = true;
+            }
+            if (result.reachable && ok) {
+                this.log.info(`DNS alias delegation verified for ${sourceRecordName} -> ${targetRecordName} via system resolver fallback.`);
+                return;
+            }
+            if (!systemResolverHadReachableResult && attempt >= systemResolverReachabilityAttempts) {
+                throw new Error(`System DNS resolver is not reachable for ${sourceRecordName}. Aborting challenge because local DNS resolution is unavailable.`);
+            }
+            if (result.reachable) {
+                this.log.debug(`System resolver fallback does not yet see DNS alias delegation for ${sourceRecordName} -> ${targetRecordName}. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${systemResolverMaxAttempts})`);
+            }
+            else {
+                this.log.debug(`System resolver for ${sourceRecordName} is currently not reachable. Retrying in ${waitForMs}ms. (Attempt ${attempt} / ${systemResolverMaxAttempts})`);
+            }
+            if (attempt < systemResolverMaxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, waitForMs));
+            }
+        }
+        this.log.warn(`System resolver fallback timed out while waiting for DNS alias delegation ${sourceRecordName} -> ${targetRecordName}. Proceeding with ACME challenge anyway (best effort).`);
     }
     getAcmeDnsDelegationTargetForCollection(collectionId) {
         const credential = this.getCollectionAcmeDnsCredentials(collectionId);
