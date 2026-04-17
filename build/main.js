@@ -1432,15 +1432,14 @@ class AcmeAdapter extends utils.Adapter {
                     if (aliasDnsOnlyFlow) {
                         this.log.info('DNS-01 alias configured in DNS-only mode: waiting for CNAME delegation and DNS propagation before continuing the ACME flow.');
                     }
-                    const hasHttp01Targets = this.config.http01Active && hasNonWildcardDomains;
-                    const restoreHttp01FastFail = this.applyHttp01SelfCheckFastFail(hasHttp01Targets);
-                    const restoreHttp01NetworkPreference = this.applyHttp01SelfCheckNetworkPreference(hasHttp01Targets);
+                    const restoreHttp01FastFail = () => undefined;
+                    const restoreHttp01NetworkPreference = () => undefined;
                     try {
                         cert = (await this.acmeClient.auto({
                             csr,
                             email: this.config.maintainerEmail,
                             termsOfServiceAgreed: true,
-                            skipChallengeVerification: aliasDnsOnlyFlow,
+                            skipChallengeVerification: true,
                             challengePriority,
                             challengeCreateFn: async (authz, challenge, keyAuthorization) => {
                                 this.log.debug(`Satisfying challenge ${challenge.type} for ${authz.identifier.value}`);
