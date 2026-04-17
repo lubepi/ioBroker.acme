@@ -1646,10 +1646,7 @@ class AcmeAdapter extends utils.Adapter {
                 return;
             }
 
-            if (
-                this.config.dns01Active &&
-                ['acme-dns-01-acmedns', 'acme-dns-01-duckdns'].includes(this.config.dns01Module)
-            ) {
+            if (this.config.dns01Active && this.config.dns01Module === 'acme-dns-01-duckdns') {
                 const dns01Domains = this.config.http01Active ? wildcardDomains : domains;
                 const uniqueDns01Domains = Array.from(new Set(dns01Domains.map(domain => domain.toLowerCase())));
 
