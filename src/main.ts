@@ -1748,9 +1748,8 @@ class AcmeAdapter extends utils.Adapter {
                         );
                     }
 
-                    const hasHttp01Targets = this.config.http01Active && hasNonWildcardDomains;
-                    const restoreHttp01FastFail = this.applyHttp01SelfCheckFastFail(hasHttp01Targets);
-                    const restoreHttp01NetworkPreference = this.applyHttp01SelfCheckNetworkPreference(hasHttp01Targets);
+                    const restoreHttp01FastFail = (): void => undefined;
+                    const restoreHttp01NetworkPreference = (): void => undefined;
 
                     try {
                         cert = (
@@ -1758,7 +1757,7 @@ class AcmeAdapter extends utils.Adapter {
                                 csr,
                                 email: this.config.maintainerEmail,
                                 termsOfServiceAgreed: true,
-                                skipChallengeVerification: aliasDnsOnlyFlow,
+                                skipChallengeVerification: true,
                                 challengePriority,
                                 challengeCreateFn: async (authz, challenge, keyAuthorization) => {
                                     this.log.debug(
