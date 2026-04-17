@@ -33,12 +33,12 @@ async function registerAcmeDnsAccount(baseUrl) {
     }
     const payload = await response.json();
     const username = ensureString(payload?.username, 'register response username');
-    const secret = ensureString(payload?.password, 'register response password');
-    const token = ensureString(payload?.subdomain, 'register response subdomain');
+    const password = ensureString(payload?.password, 'register response password');
+    const subdomain = ensureString(payload?.subdomain, 'register response subdomain');
     return {
         username,
-        secret,
-        token,
+        password,
+        subdomain,
         fullDomain: typeof payload?.fulldomain === 'string' ? payload.fulldomain : undefined,
     };
 }
@@ -50,8 +50,8 @@ class AcmeDnsChallenge {
     updateUrl;
     constructor(config = {}) {
         this.apiUser = ensureString(config.username, 'username');
-        this.apiKey = ensureString(config.secret, 'secret');
-        this.subdomain = ensureString(config.token, 'token (subdomain)');
+        this.apiKey = ensureString(config.password, 'password');
+        this.subdomain = ensureString(config.subdomain, 'subdomain');
         const baseUrl = normalizeBaseUrl(config.baseUrl);
         this.updateUrl = `${baseUrl}/update`;
         this.propagationDelay = config.propagationDelay || 30_000;

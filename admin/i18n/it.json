@@ -1,6 +1,6 @@
 {
     "acme-dns": "acme-dns",
-    "acme-dns collection overrides": "La raccolta acme-dns esegue l'override",
+    "acme-dns collection credentials": "Credenziali della raccolta acme-dns",
     "Activate DNS-01 challenge verification. Mandatory for wildcard certificates. Normal domains only use DNS-01 if HTTP-01 is disabled above.": "Attiva la verifica della challenge DNS-01. Obbligatoria per i certificati wildcard. I domini normali usano DNS-01 solo se HTTP-01 è disattivato sopra.",
     "Activate HTTP-01 challenge verification. For normal domains (no wildcards), this takes priority over DNS-01. Wildcards always use DNS-01. No automatic fallback on failure.": "Attiva la verifica della challenge HTTP-01. Per i domini normali (senza wildcard), questa ha priorità su DNS-01. I wildcard usano sempre DNS-01. Nessun fallback automatico in caso di errore.",
     "Allow ACME to stop conflicting adapters on HTTP-01 port": "Consenti ad ACME di interrompere gli adattatori in conflitto sulla porta HTTP-01",
@@ -9,7 +9,6 @@
     "Base URL (optional)": "URL di base (facoltativo)",
     "Challenges": "Sfide",
     "CloudFlare": "CloudFlare",
-    "CNAME target (auto)": "Target CNAME (automatico)",
     "Collection ID": "Identificativo della raccolta",
     "Collections": "Collezioni",
     "Common name": "Nome comune",
@@ -50,15 +49,16 @@
     "Netcup": "Netcup",
     "Optional API base URL for custom acme-dns instances. Leave empty to use https://auth.acme-dns.io": "URL di base API facoltativo per istanze acme-dns personalizzate. Lasciare vuoto per utilizzare https://auth.acme-dns.io",
     "Optional delegation alias for providers where the adapter writes TXT records directly (for example deSEC or DuckDNS). Enter only the domain, without _acme-challenge.": "Alias ​​di delega facoltativo per i provider in cui l'adattatore scrive direttamente i record TXT (ad esempio deSEC o DuckDNS). Inserisci solo il dominio, senza _acme-challenge.",
-    "Optional: Override acme-dns credentials per collection ID. Requires DNS-01 module 'acme-dns (CNAME delegation)'.": "Facoltativo: sovrascrivere le credenziali acme-dns per ID raccolta. Richiede il modulo DNS-01 'acme-dns (delega CNAME)'.",
-    "Secret (X-Api-Key)": "Segreto (chiave X-Api)",
+    "Leave empty for automatic registration on the default server. For custom servers, add a row with collection ID and base URL.": "Lascia vuoto per la registrazione automatica sul server predefinito. Per server personalizzati, aggiungi una riga con ID collezione e URL di base.",
     "Status": "Stato",
     "Todo!": "Fare!",
-    "Token (subdomain)": "Token (sottodominio)",
     "Use DNS-01 challenges": "Usa le sfide DNS-01",
     "Use HTTP-01 challenges": "Usa le sfide HTTP-01",
     "Use staging server": "Usa il server di staging",
     "Useful for testing/challenge verification purposes.": "Utile per scopi di test / verifica della sfida.",
-    "Username (X-Api-User)": "Nome utente (utente X-Api)",
-    "Vultr": "Vultr"
+    "Vultr": "Vultr",
+    "Username": "Nome utente",
+    "Password": "Password",
+    "Subdomain": "Sottodominio",
+    "CNAME target (fulldomain)": "Destinazione CNAME (fulldomain)"
 }

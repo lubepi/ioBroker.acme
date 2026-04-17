@@ -1,6 +1,6 @@
 {
     "acme-dns": "acme-dns",
-    "acme-dns collection overrides": "перевизначення колекції acme-dns",
+    "acme-dns collection credentials": "облікові дані колекції acme-dns",
     "Activate DNS-01 challenge verification. Mandatory for wildcard certificates. Normal domains only use DNS-01 if HTTP-01 is disabled above.": "Увімкніть перевірку challenge DNS-01. Обов'язкова для wildcard-сертифікатів. Звичайні домени використовують DNS-01 лише якщо HTTP-01 вище вимкнено.",
     "Activate HTTP-01 challenge verification. For normal domains (no wildcards), this takes priority over DNS-01. Wildcards always use DNS-01. No automatic fallback on failure.": "Увімкніть перевірку challenge HTTP-01. Для звичайних доменів (без wildcard) цей метод має пріоритет над DNS-01. Wildcard завжди використовують DNS-01. Автоматичного fallback у разі помилки немає.",
     "Allow ACME to stop conflicting adapters on HTTP-01 port": "Дозволити ACME зупиняти конфліктні адаптери на порту HTTP-01",
@@ -9,7 +9,6 @@
     "Base URL (optional)": "Базова URL-адреса (необов’язково)",
     "Challenges": "Challenges",
     "CloudFlare": "CloudFlare",
-    "CNAME target (auto)": "Ціль CNAME (авто)",
     "Collection ID": "ID колекції",
     "Collections": "Колекції",
     "Common name": "Звичайне ім'я",
@@ -50,15 +49,16 @@
     "Netcup": "Netcup",
     "Optional API base URL for custom acme-dns instances. Leave empty to use https://auth.acme-dns.io": "Додаткова базова URL-адреса API для власних екземплярів acme-dns. Залиште пустим, щоб використовувати https://auth.acme-dns.io",
     "Optional delegation alias for providers where the adapter writes TXT records directly (for example deSEC or DuckDNS). Enter only the domain, without _acme-challenge.": "Додатковий псевдонім делегування для постачальників, де адаптер записує записи TXT безпосередньо (наприклад, deSEC або DuckDNS). Введіть лише домен, без _acme-challenge.",
-    "Optional: Override acme-dns credentials per collection ID. Requires DNS-01 module 'acme-dns (CNAME delegation)'.": "Необов’язково: замініть облікові дані acme-dns для кожного ідентифікатора колекції. Потрібен модуль DNS-01 'acme-dns (делегування CNAME)'.",
-    "Secret (X-Api-Key)": "Секрет (X-Api-ключ)",
+    "Leave empty for automatic registration on the default server. For custom servers, add a row with collection ID and base URL.": "Залиште порожнім для автоматичної реєстрації на сервері за замовчуванням. Для власних серверів додайте рядок з ID колекції та базовою URL-адресою.",
     "Status": "Статус",
     "Todo!": "Зробити!",
-    "Token (subdomain)": "Токен (субдомен)",
     "Use DNS-01 challenges": "Використовуйте завдання DNS-01",
     "Use HTTP-01 challenges": "Використовуйте виклики HTTP-01",
     "Use staging server": "Використовуйте проміжний сервер",
     "Useful for testing/challenge verification purposes.": "Корисно для цілей тестування/перевірки.",
-    "Username (X-Api-User)": "Ім'я користувача (X-Api-User)",
-    "Vultr": "Vultr"
+    "Vultr": "Vultr",
+    "Username": "Ім'я користувача",
+    "Password": "Пароль",
+    "Subdomain": "Субдомен",
+    "CNAME target (fulldomain)": "Ціль CNAME (fulldomain)"
 }

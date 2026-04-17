@@ -45,11 +45,11 @@ interface CollectionConfig {
     altNames: string;
 }
 
-interface AcmeDnsCollectionOverride {
+interface AcmeDnsCollectionCredentials {
     collectionId: string;
     username: string;
-    secret: string;
-    token: string;
+    password: string;
+    subdomain: string;
     baseUrl: string;
     fullDomain?: string;
 }
@@ -66,6 +66,7 @@ class AcmeAdapter extends utils.Adapter {
     private readonly dnsChallengeCache: Record<string, any>;
     private readonly acmeDnsCnameCheckedHosts: Set<string>;
     private readonly acmeDnsAutoRegisteredCollections: Set<string>;
+    private readonly acmeDnsBlockedCollectionReasons: Map<string, string>;
     private acmeDnsAutoRegisterBlocked: boolean;
     private http01ServerReady: boolean;
     private http01ServerInitPromise: Promise<void> | null;
@@ -130,6 +131,7 @@ class AcmeAdapter extends utils.Adapter {
         this.dnsChallengeCache = {};
         this.acmeDnsCnameCheckedHosts = new Set();
         this.acmeDnsAutoRegisteredCollections = new Set();
+        this.acmeDnsBlockedCollectionReasons = new Map();
         this.acmeDnsAutoRegisterBlocked = false;
         this.http01ServerReady = false;
         this.http01ServerInitPromise = null;
@@ -153,6 +155,7 @@ class AcmeAdapter extends utils.Adapter {
                 }
                 this.acmeDnsCnameCheckedHosts.clear();
                 this.acmeDnsAutoRegisteredCollections.clear();
+                this.acmeDnsBlockedCollectionReasons.clear();
                 this.http01ServerReady = false;
                 this.http01ServerInitPromise = null;
                 await this.restoreAdaptersOnSamePort();
@@ -177,12 +180,12 @@ class AcmeAdapter extends utils.Adapter {
             }
         }
 
-        const collectionOverrides = safeConfig.dns01CollectionOverrides;
-        if (Array.isArray(collectionOverrides)) {
-            safeConfig.dns01CollectionOverrides = collectionOverrides.map((entry: any) => ({
+        const collectionCredentials = safeConfig.dns01CollectionCredentials;
+        if (Array.isArray(collectionCredentials)) {
+            safeConfig.dns01CollectionCredentials = collectionCredentials.map((entry: any) => ({
                 ...entry,
-                secret: entry?.secret ? '***REDACTED***' : entry?.secret,
-                token: entry?.token ? '***REDACTED***' : entry?.token,
+                password: entry?.password ? '***REDACTED***' : entry?.password,
+                subdomain: entry?.subdomain ? '***REDACTED***' : entry?.subdomain,
             }));
         }
 
@@ -197,6 +200,17 @@ class AcmeAdapter extends utils.Adapter {
         } else if (!this.config.maintainerEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(this.config.maintainerEmail)) {
             this.terminate('Invalid or missing maintainer email address');
         } else {
+            const deterministicConfigErrors = this.getDeterministicConfigurationErrors();
+            if (deterministicConfigErrors.length) {
+                for (const err of deterministicConfigErrors) {
+                    this.log.error(`Configuration preflight failed: ${err}`);
+                }
+                this.terminate(
+                    `Configuration preflight failed with ${deterministicConfigErrors.length} error(s). Fix adapter settings and retry.`,
+                );
+                return;
+            }
+
             // Setup challenges
             await this.initChallenges();
 
@@ -302,7 +316,7 @@ class AcmeAdapter extends utils.Adapter {
 
             // Log dns-01 options with sensitive values redacted
             const safeOpts = { ...dns01Options };
-            const sensitiveOptKeys = ['apiKey', 'apiPassword', 'key', 'secret', 'token'];
+            const sensitiveOptKeys = ['apiKey', 'apiPassword', 'key', 'secret', 'token', 'password', 'subdomain'];
             for (const k of sensitiveOptKeys) {
                 if (safeOpts[k]) {
                     safeOpts[k] = '***REDACTED***';
@@ -310,21 +324,14 @@ class AcmeAdapter extends utils.Adapter {
             }
             this.log.debug(`dns-01 options: ${JSON.stringify(safeOpts)}`);
 
-            if (
-                this.config.dns01Module === 'acme-dns-01-acmedns' &&
-                !this.hasAcmeDnsCredentials({
-                    username: dns01Options.username,
-                    secret: dns01Options.secret,
-                    token: dns01Options.token,
-                })
-            ) {
+            if (this.config.dns01Module === 'acme-dns-01-acmedns') {
                 this.log.info(
-                    'acme-dns global credentials are empty; adapter will use per-collection overrides and/or automatic account registration',
+                    'acme-dns uses per-collection credentials; missing credentials are created automatically during order processing',
                 );
-                // Keep a valid handler object for dns-01; real credentials will be set per collection during order processing.
-                dns01Options.username = dns01Options.username || '__auto-register__';
-                dns01Options.secret = dns01Options.secret || '__auto-register__';
-                dns01Options.token = dns01Options.token || '__auto-register__';
+                // Keep a valid handler object for dns-01; real credentials are injected per collection during order processing.
+                dns01Options.username = '__auto-register__';
+                dns01Options.password = '__auto-register__';
+                dns01Options.subdomain = '__auto-register__';
             }
 
             // Do this inside try... catch as the module is configurable
@@ -897,37 +904,33 @@ class AcmeAdapter extends utils.Adapter {
         });
     }
 
-    private hasAcmeDnsCredentials(input: { username?: unknown; secret?: unknown; token?: unknown }): boolean {
-        const username = typeof input.username === 'string' ? input.username.trim() : '';
-        const secret = typeof input.secret === 'string' ? input.secret.trim() : '';
-        const token = typeof input.token === 'string' ? input.token.trim() : '';
-        return Boolean(username && secret && token);
-    }
-
-    private async saveCollectionAcmeDnsOverride(override: AcmeDnsCollectionOverride): Promise<void> {
+    private async saveCollectionAcmeDnsCredentials(credentials: AcmeDnsCollectionCredentials): Promise<void> {
         const instanceObjectId = `system.adapter.${this.namespace}`;
         const instanceObj = await this.getForeignObjectAsync(instanceObjectId);
         if (!instanceObj?.native) {
             throw new Error(`Unable to update adapter config object: ${instanceObjectId}`);
         }
 
-        const existing = Array.isArray(instanceObj.native.dns01CollectionOverrides)
-            ? [...instanceObj.native.dns01CollectionOverrides]
+        const existing = Array.isArray(instanceObj.native.dns01CollectionCredentials)
+            ? [...instanceObj.native.dns01CollectionCredentials]
             : [];
-        const idx = existing.findIndex((entry: any) => entry?.collectionId === override.collectionId);
+        const idx = existing.findIndex((entry: any) => entry?.collectionId === credentials.collectionId);
         if (idx >= 0) {
-            existing[idx] = override;
+            existing[idx] = credentials;
         } else {
-            existing.push(override);
+            existing.push(credentials);
         }
 
-        instanceObj.native.dns01CollectionOverrides = existing;
+        instanceObj.native.dns01CollectionCredentials = existing;
         await this.setForeignObjectAsync(instanceObjectId, instanceObj);
 
-        this.config.dns01CollectionOverrides = existing as AcmeDnsCollectionOverride[];
+        this.config.dns01CollectionCredentials = existing as AcmeDnsCollectionCredentials[];
     }
 
-    private async autoCreateCollectionAcmeDnsOverride(collectionId: string): Promise<AcmeDnsCollectionOverride | null> {
+    private async autoCreateCollectionAcmeDnsCredentials(
+        collectionId: string,
+        preferredBaseUrl?: string,
+    ): Promise<AcmeDnsCollectionCredentials | null> {
         if (this.acmeDnsAutoRegisterBlocked) {
             this.log.warn(
                 `Collection ${collectionId}: automatic acme-dns registration is temporarily disabled for this run due to previous registration failure`,
@@ -935,27 +938,27 @@ class AcmeAdapter extends utils.Adapter {
             return null;
         }
 
-        const baseUrl = `${this.config.dns01ObaseUrl || ''}`.trim();
+        const baseUrl = `${preferredBaseUrl || this.config.dns01ObaseUrl || ''}`.trim();
 
         try {
             const registration = await registerAcmeDnsAccount(baseUrl || undefined);
-            const override: AcmeDnsCollectionOverride = {
+            const credentials: AcmeDnsCollectionCredentials = {
                 collectionId,
                 username: registration.username,
-                secret: registration.secret,
-                token: registration.token,
+                password: registration.password,
+                subdomain: registration.subdomain,
                 baseUrl,
                 fullDomain: registration.fullDomain,
             };
 
-            await this.saveCollectionAcmeDnsOverride(override);
+            await this.saveCollectionAcmeDnsCredentials(credentials);
             this.log.info(`Collection ${collectionId}: acme-dns account created automatically`);
             if (registration.fullDomain) {
                 this.log.info(
                     `Collection ${collectionId}: configure CNAME target to ${registration.fullDomain} for DNS-01 delegation`,
                 );
             }
-            return override;
+            return credentials;
         } catch (err) {
             this.acmeDnsAutoRegisterBlocked = true;
             this.log.error(
@@ -965,28 +968,72 @@ class AcmeAdapter extends utils.Adapter {
         }
     }
 
-    private getCollectionAcmeDnsOverride(collectionId: string): AcmeDnsCollectionOverride | null {
-        const overrides = this.config.dns01CollectionOverrides;
-        if (!Array.isArray(overrides) || !overrides.length) {
+    private getCollectionAcmeDnsCredentials(collectionId: string): AcmeDnsCollectionCredentials | null {
+        const credentials = this.config.dns01CollectionCredentials;
+        if (!Array.isArray(credentials) || !credentials.length) {
             return null;
         }
 
-        const override = overrides.find(entry => entry?.collectionId === collectionId);
-        if (!override) {
+        const credential = credentials.find(entry => entry?.collectionId === collectionId);
+        if (!credential) {
             return null;
         }
 
         return {
             collectionId,
-            username: `${override.username || ''}`.trim(),
-            secret: `${override.secret || ''}`.trim(),
-            token: `${override.token || ''}`.trim(),
-            baseUrl: `${override.baseUrl || ''}`.trim(),
+            username: `${credential.username || ''}`.trim(),
+            password: `${credential.password || ''}`.trim(),
+            subdomain: `${credential.subdomain || ''}`.trim(),
+            baseUrl: `${credential.baseUrl || ''}`.trim(),
             fullDomain:
-                typeof override.fullDomain === 'string' && override.fullDomain.trim()
-                    ? override.fullDomain.trim()
+                typeof credential.fullDomain === 'string' && credential.fullDomain.trim()
+                    ? credential.fullDomain.trim()
                     : undefined,
         };
+    }
+
+    private getDeterministicConfigurationErrors(): string[] {
+        const errors: string[] = [];
+        if (!this.config.dns01Active || this.config.dns01Module !== 'acme-dns-01-acmedns') {
+            return errors;
+        }
+
+        const collections = Array.isArray(this.config.collections) ? this.config.collections : [];
+        const knownCollectionIds = new Set(
+            collections
+                .map(collection => `${collection?.id || ''}`.trim().toLowerCase())
+                .filter(collectionId => !!collectionId),
+        );
+
+        const credentialRows = Array.isArray(this.config.dns01CollectionCredentials)
+            ? this.config.dns01CollectionCredentials
+            : [];
+
+        for (let index = 0; index < credentialRows.length; index += 1) {
+            const row = credentialRows[index];
+            const rowLabel = `acme-dns credentials row ${index + 1}`;
+
+            const collectionId = `${row?.collectionId || ''}`.trim();
+            const baseUrl = `${row?.baseUrl || ''}`.trim();
+
+            if (collectionId && !knownCollectionIds.has(collectionId.toLowerCase())) {
+                errors.push(`${rowLabel}: collection ID "${collectionId}" does not exist in collections table`);
+            }
+
+            if (baseUrl) {
+                try {
+                    // Validate deterministic URL format upfront to fail fast.
+                    const parsedUrl = new URL(baseUrl);
+                    if (!parsedUrl.hostname) {
+                        errors.push(`${rowLabel}: base URL "${baseUrl}" has no hostname`);
+                    }
+                } catch {
+                    errors.push(`${rowLabel}: base URL "${baseUrl}" is invalid`);
+                }
+            }
+        }
+
+        return errors;
     }
 
     private normalizeDnsName(name: string): string {
@@ -1321,17 +1368,17 @@ class AcmeAdapter extends utils.Adapter {
     }
 
     private getAcmeDnsDelegationTargetForCollection(collectionId: string): string | null {
-        const override = this.getCollectionAcmeDnsOverride(collectionId);
-        if (override?.fullDomain) {
-            return this.normalizeDnsName(override.fullDomain);
+        const credential = this.getCollectionAcmeDnsCredentials(collectionId);
+        if (credential?.fullDomain) {
+            return this.normalizeDnsName(credential.fullDomain);
         }
 
-        const token = (override?.token || `${this.config.dns01Otoken || ''}`).trim();
+        const token = `${credential?.subdomain || ''}`.trim();
         if (!token) {
             return null;
         }
 
-        const configuredBaseUrl = (override?.baseUrl || `${this.config.dns01ObaseUrl || ''}`).trim();
+        const configuredBaseUrl = (credential?.baseUrl || `${this.config.dns01ObaseUrl || ''}`).trim();
         const baseUrl = configuredBaseUrl || 'https://auth.acme-dns.io';
 
         try {
@@ -1373,45 +1420,35 @@ class AcmeAdapter extends utils.Adapter {
         return expectedTarget;
     }
 
-    private async activateCollectionDnsOverride(collectionId: string): Promise<() => void> {
+    private async activateCollectionDnsCredentials(collectionId: string): Promise<() => void> {
+        this.acmeDnsBlockedCollectionReasons.delete(collectionId);
+
         if (!this.config.dns01Active || this.config.dns01Module !== 'acme-dns-01-acmedns') {
             return () => undefined;
         }
 
-        const globalCredentialsReady = this.hasAcmeDnsCredentials({
-            username: this.config.dns01Ousername,
-            secret: this.config.dns01Osecret,
-            token: this.config.dns01Otoken,
-        });
-
-        let override = this.getCollectionAcmeDnsOverride(collectionId);
+        let credentials = this.getCollectionAcmeDnsCredentials(collectionId);
         let autoRegistered = false;
-        if (!override && !globalCredentialsReady) {
+        if (!credentials) {
             this.log.info(
                 `Collection ${collectionId}: no acme-dns credentials configured, trying automatic account registration`,
             );
-            override = await this.autoCreateCollectionAcmeDnsOverride(collectionId);
-            autoRegistered = !!override;
+            credentials = await this.autoCreateCollectionAcmeDnsCredentials(collectionId);
+            autoRegistered = !!credentials;
         }
 
-        if (!override) {
-            return () => undefined;
+        if (credentials && !credentials.username && !credentials.password && !credentials.subdomain) {
+            this.log.info(
+                `Collection ${collectionId}: acme-dns credentials row has no credentials, trying automatic account registration`,
+            );
+            credentials = await this.autoCreateCollectionAcmeDnsCredentials(collectionId, credentials.baseUrl);
+            autoRegistered = !!credentials;
         }
 
-        const missing: string[] = [];
-        if (!override.username) {
-            missing.push('username');
-        }
-        if (!override.secret) {
-            missing.push('secret');
-        }
-        if (!override.token) {
-            missing.push('token');
-        }
-
-        if (missing.length) {
-            this.log.error(
-                `Collection ${collectionId}: acme-dns override is incomplete (missing ${missing.join(', ')})`,
+        if (!credentials) {
+            this.acmeDnsBlockedCollectionReasons.set(
+                collectionId,
+                'acme-dns credentials could not be determined (automatic registration failed or was blocked)',
             );
             return () => undefined;
         }
@@ -1423,11 +1460,11 @@ class AcmeAdapter extends utils.Adapter {
             }
         }
 
-        dns01Options.username = override.username;
-        dns01Options.secret = override.secret;
-        dns01Options.token = override.token;
-        if (override.baseUrl) {
-            dns01Options.baseUrl = override.baseUrl;
+        dns01Options.username = credentials.username;
+        dns01Options.password = credentials.password;
+        dns01Options.subdomain = credentials.subdomain;
+        if (credentials.baseUrl) {
+            dns01Options.baseUrl = credentials.baseUrl;
         }
 
         const previousHandler = this.challenges['dns-01'];
@@ -1444,7 +1481,7 @@ class AcmeAdapter extends utils.Adapter {
                 await overrideHandler.init({ request });
             } catch (err) {
                 this.log.warn(
-                    `Collection ${collectionId}: acme-dns override init() failed, continuing anyway: ${AcmeAdapter.getErrorMessage(err)}`,
+                    `Collection ${collectionId}: acme-dns credentials init() failed, continuing anyway: ${AcmeAdapter.getErrorMessage(err)}`,
                 );
             }
         }
@@ -1453,7 +1490,7 @@ class AcmeAdapter extends utils.Adapter {
         if (autoRegistered) {
             this.acmeDnsAutoRegisteredCollections.add(collectionId);
         }
-        this.log.info(`Collection ${collectionId}: using dedicated acme-dns override credentials`);
+        this.log.info(`Collection ${collectionId}: using dedicated acme-dns collection credentials`);
 
         return () => {
             this.challenges['dns-01'] = previousHandler;
@@ -1461,7 +1498,7 @@ class AcmeAdapter extends utils.Adapter {
                 overrideHandler.shutdown();
             } catch (err) {
                 this.log.debug(
-                    `Collection ${collectionId}: acme-dns override shutdown failed: ${AcmeAdapter.getErrorMessage(err)}`,
+                    `Collection ${collectionId}: acme-dns credentials shutdown failed: ${AcmeAdapter.getErrorMessage(err)}`,
                 );
             }
         };
@@ -1534,6 +1571,21 @@ class AcmeAdapter extends utils.Adapter {
                 return;
             }
 
+            if (
+                this.config.dns01Active &&
+                ['acme-dns-01-acmedns', 'acme-dns-01-duckdns'].includes(this.config.dns01Module)
+            ) {
+                const dns01Domains = this.config.http01Active ? wildcardDomains : domains;
+                const uniqueDns01Domains = Array.from(new Set(dns01Domains.map(domain => domain.toLowerCase())));
+
+                if (uniqueDns01Domains.length > 1) {
+                    this.log.warn(
+                        `Collection ${collection.id} contains multiple DNS-01 domains (${uniqueDns01Domains.join(', ')}) while provider ${this.config.dns01Module} supports only one TXT record per account. Split this into one domain per collection and retry.`,
+                    );
+                    return;
+                }
+            }
+
             // stopAdaptersOnSamePort can be called many times as has its own checks to prevent unnecessary action.
             await this.stopAdaptersOnSamePort();
 
@@ -1542,7 +1594,13 @@ class AcmeAdapter extends utils.Adapter {
                 return;
             }
 
-            const restoreDnsOverride = await this.activateCollectionDnsOverride(collection.id);
+            const restoreDnsOverride = await this.activateCollectionDnsCredentials(collection.id);
+            const blockedReason = this.acmeDnsBlockedCollectionReasons.get(collection.id);
+            if (blockedReason) {
+                this.log.warn(`Collection ${collection.id}: skipping certificate order because ${blockedReason}.`);
+                restoreDnsOverride();
+                return;
+            }
 
             if (this.acmeDnsAutoRegisteredCollections.has(collection.id)) {
                 const delegationTarget = this.getAcmeDnsDelegationTargetForCollection(collection.id);

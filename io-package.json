@@ -182,7 +182,7 @@
     "dns01OcustomerNumber": "",
     "dns01OapiPassword": "",
     "dns01Alias": "",
-    "dns01CollectionOverrides": [],
+    "dns01CollectionCredentials": [],
     "collections": [
       {
         "id": "exampleDomain",
@@ -197,7 +197,7 @@
     "dns01Okey",
     "dns01Osecret",
     "dns01Otoken",
-    "dns01CollectionOverrides"
+    "dns01CollectionCredentials"
   ],
   "protectedNative": [
     "dns01OapiKey",
@@ -205,7 +205,7 @@
     "dns01Okey",
     "dns01Osecret",
     "dns01Otoken",
-    "dns01CollectionOverrides"
+    "dns01CollectionCredentials"
   ],
   "objects": [],
   "instanceObjects": [
