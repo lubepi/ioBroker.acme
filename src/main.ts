@@ -23,6 +23,8 @@ const adapterStopWaitTimeoutMs = 20000;
 const adapterStopPollIntervalMs = 500;
 const portReleaseWaitTimeoutMs = 10000;
 const portReleasePollIntervalMs = 250;
+const autoRegistrationRestartGuardStateId = 'autoRegistrationRestartGuard';
+const autoRegistrationRestartGuardMaxAgeMs = 30 * 1000;
 
 interface AcmeAccount {
     full: Record<string, any> | null;
@@ -52,6 +54,11 @@ interface AcmeDnsCollectionCredentials {
     fullDomain?: string;
 }
 
+interface AutoRegistrationRestartGuardState {
+    createdAt: number;
+    collectionIds: string[];
+}
+
 class AcmeAdapter extends utils.Adapter {
     declare config: AcmeAdapterConfig;
     private account: AcmeAccount;
@@ -64,6 +71,7 @@ class AcmeAdapter extends utils.Adapter {
     private readonly dnsChallengeCache: Record<string, any>;
     private readonly acmeDnsCnameCheckedHosts: Set<string>;
     private readonly acmeDnsAutoRegisteredCollections: Set<string>;
+    private readonly autoRegistrationRestartGuardCollectionIds: Set<string>;
     private readonly acmeDnsBlockedCollectionReasons: Map<string, string>;
     private acmeDnsAutoRegisterBlocked: boolean;
     private http01ServerReady: boolean;
@@ -129,6 +137,7 @@ class AcmeAdapter extends utils.Adapter {
         this.dnsChallengeCache = {};
         this.acmeDnsCnameCheckedHosts = new Set();
         this.acmeDnsAutoRegisteredCollections = new Set();
+        this.autoRegistrationRestartGuardCollectionIds = new Set();
         this.acmeDnsBlockedCollectionReasons = new Map();
         this.acmeDnsAutoRegisterBlocked = false;
         this.http01ServerReady = false;
@@ -153,6 +162,7 @@ class AcmeAdapter extends utils.Adapter {
                 }
                 this.acmeDnsCnameCheckedHosts.clear();
                 this.acmeDnsAutoRegisteredCollections.clear();
+                this.autoRegistrationRestartGuardCollectionIds.clear();
                 this.acmeDnsBlockedCollectionReasons.clear();
                 this.http01ServerReady = false;
                 this.http01ServerInitPromise = null;
@@ -207,6 +217,16 @@ class AcmeAdapter extends utils.Adapter {
                 this.terminate(
                     `Configuration preflight failed with ${deterministicConfigErrors.length} error(s). Fix adapter settings and retry.`,
                 );
+                return;
+            }
+
+            await this.consumeAutoRegistrationRestartGuard();
+            if (this.autoRegistrationRestartGuardCollectionIds.size > 0) {
+                const guardedCollections = Array.from(this.autoRegistrationRestartGuardCollectionIds).join(', ');
+                this.log.warn(
+                    `Expected follow-up start after acme-dns auto-registration detected (${guardedCollections}); this run is intentionally aborted.`,
+                );
+                this.terminate('Expected follow-up start after acme-dns auto-registration; run aborted intentionally');
                 return;
             }
 
@@ -905,6 +925,104 @@ class AcmeAdapter extends utils.Adapter {
         this.config.dns01CollectionCredentials = existing as AcmeDnsCollectionCredentials[];
     }
 
+    private async persistAutoRegistrationRestartGuard(collectionId: string): Promise<void> {
+        const normalizedCollectionId = `${collectionId || ''}`.trim();
+        if (!normalizedCollectionId) {
+            return;
+        }
+
+        const collectionIds = new Set<string>([normalizedCollectionId]);
+        try {
+            const existingState = await this.getStateAsync(autoRegistrationRestartGuardStateId);
+            if (typeof existingState?.val === 'string' && existingState.val.trim()) {
+                const parsed = JSON.parse(existingState.val) as Partial<AutoRegistrationRestartGuardState>;
+                if (Array.isArray(parsed.collectionIds)) {
+                    for (const id of parsed.collectionIds) {
+                        const normalizedId = `${id || ''}`.trim();
+                        if (normalizedId) {
+                            collectionIds.add(normalizedId);
+                        }
+                    }
+                }
+            }
+        } catch {
+            // Ignore invalid/missing previous guard payload and overwrite with a fresh one.
+        }
+
+        const payload: AutoRegistrationRestartGuardState = {
+            createdAt: Date.now(),
+            collectionIds: Array.from(collectionIds),
+        };
+
+        try {
+            await this.extendObjectAsync(autoRegistrationRestartGuardStateId, {
+                type: 'state',
+                common: {
+                    name: 'Internal auto-registration restart guard',
+                    type: 'string',
+                    role: 'json',
+                    read: true,
+                    write: false,
+                },
+                native: {},
+            });
+            await this.setStateAsync(autoRegistrationRestartGuardStateId, JSON.stringify(payload), true);
+        } catch (err) {
+            this.log.debug(`Failed to persist auto-registration restart guard (${AcmeAdapter.getErrorMessage(err)})`);
+        }
+    }
+
+    private async clearAutoRegistrationRestartGuard(): Promise<void> {
+        try {
+            await this.setStateAsync(autoRegistrationRestartGuardStateId, '', true);
+        } catch (err) {
+            this.log.debug(`Failed to clear auto-registration restart guard (${AcmeAdapter.getErrorMessage(err)})`);
+        }
+    }
+
+    private async consumeAutoRegistrationRestartGuard(): Promise<void> {
+        this.autoRegistrationRestartGuardCollectionIds.clear();
+        if (!this.config.dns01Active || this.config.dns01Module !== 'acme-dns-01-acmedns') {
+            return;
+        }
+
+        let shouldClear = false;
+        try {
+            const state = await this.getStateAsync(autoRegistrationRestartGuardStateId);
+            if (typeof state?.val !== 'string' || !state.val.trim()) {
+                return;
+            }
+
+            shouldClear = true;
+
+            const parsed = JSON.parse(state.val) as Partial<AutoRegistrationRestartGuardState>;
+            const createdAt = typeof parsed.createdAt === 'number' ? parsed.createdAt : 0;
+            const collectionIds = Array.isArray(parsed.collectionIds)
+                ? parsed.collectionIds.map(id => `${id || ''}`.trim()).filter(id => !!id)
+                : [];
+
+            if (!createdAt || !collectionIds.length) {
+                return;
+            }
+
+            const ageMs = Date.now() - createdAt;
+            if (ageMs < 0 || ageMs > autoRegistrationRestartGuardMaxAgeMs) {
+                this.log.debug(`Ignoring stale auto-registration restart guard (${ageMs}ms old).`);
+                return;
+            }
+
+            for (const id of collectionIds) {
+                this.autoRegistrationRestartGuardCollectionIds.add(id);
+            }
+        } catch (err) {
+            this.log.debug(`Failed to consume auto-registration restart guard (${AcmeAdapter.getErrorMessage(err)})`);
+        } finally {
+            if (shouldClear) {
+                await this.clearAutoRegistrationRestartGuard();
+            }
+        }
+    }
+
     private async autoCreateCollectionAcmeDnsCredentials(
         collectionId: string,
         preferredBaseUrl?: string,
@@ -930,9 +1048,12 @@ class AcmeAdapter extends utils.Adapter {
             };
 
             await this.saveCollectionAcmeDnsCredentials(credentials);
-            this.log.info(`Collection ${collectionId}: acme-dns account created automatically`);
+            await this.persistAutoRegistrationRestartGuard(collectionId);
+            this.log.warn(
+                `Collection ${collectionId}: acme-dns account created automatically and credentials were saved in acme-dns collection credentials`,
+            );
             if (registration.fullDomain) {
-                this.log.info(
+                this.log.warn(
                     `Collection ${collectionId}: configure CNAME target to ${registration.fullDomain} for DNS-01 delegation`,
                 );
             }
@@ -1341,6 +1462,7 @@ class AcmeAdapter extends utils.Adapter {
         const normalizedTarget = this.normalizeDnsName(targetRecordName);
         const authoritativeResolvers = await this.getAuthoritativeResolvers(sourceRecordName);
         let authoritativeHadReachableResolver = false;
+        let authoritativeSawAnyCname = false;
 
         if (authoritativeResolvers.length === 0) {
             this.log.warn(
@@ -1356,6 +1478,7 @@ class AcmeAdapter extends utils.Adapter {
                     return {
                         name,
                         reachable: result.reachable,
+                        hasAnyCname: result.values.length > 0,
                         ok,
                     };
                 }),
@@ -1364,6 +1487,9 @@ class AcmeAdapter extends utils.Adapter {
             const reachableChecks = checks.filter(check => check.reachable);
             if (reachableChecks.length > 0) {
                 authoritativeHadReachableResolver = true;
+                if (reachableChecks.some(check => check.hasAnyCname)) {
+                    authoritativeSawAnyCname = true;
+                }
             }
             const okCount = reachableChecks.filter(check => check.ok).length;
             if (reachableChecks.length > 0 && okCount === reachableChecks.length) {
@@ -1389,9 +1515,17 @@ class AcmeAdapter extends utils.Adapter {
         }
 
         if (authoritativeHadReachableResolver) {
+            if (!authoritativeSawAnyCname) {
+                const message =
+                    `Alias delegation missing: ${sourceRecordName} -> ${targetRecordName}. ` +
+                    `No CNAME record is visible for ${sourceRecordName} on tested resolvers. ` +
+                    `Configure _acme-challenge CNAME to ${targetRecordName} and start the adapter again.`;
+                throw new Error(message);
+            }
+
             const message =
                 `Alias delegation not visible: ${sourceRecordName} -> ${targetRecordName}. ` +
-                'The CNAME entry is either missing or not yet visible on tested resolvers. ' +
+                'The CNAME entry was detected, but is not yet visible on all tested resolvers. ' +
                 'If you have just created or updated this DNS record, wait a moment for propagation and retry the adapter run.';
             throw new Error(message);
         }
@@ -1677,15 +1811,15 @@ class AcmeAdapter extends utils.Adapter {
             if (this.acmeDnsAutoRegisteredCollections.has(collection.id)) {
                 const delegationTarget = this.getAcmeDnsDelegationTargetForCollection(collection.id);
                 if (delegationTarget) {
-                    this.log.info(
-                        `Collection ${collection.id}: automatic acme-dns registration completed. Configure _acme-challenge CNAME to ${delegationTarget} and start the adapter again.`,
+                    this.log.warn(
+                        `Collection ${collection.id}: automatic acme-dns registration completed. Credentials are stored in acme-dns collection credentials. Reload the adapter configuration page to see them. Configure _acme-challenge CNAME to ${delegationTarget} and start the adapter again.`,
                     );
                 } else {
-                    this.log.info(
-                        `Collection ${collection.id}: automatic acme-dns registration completed. Configure _acme-challenge CNAME using the generated acme-dns target and start the adapter again.`,
+                    this.log.warn(
+                        `Collection ${collection.id}: automatic acme-dns registration completed. Credentials are stored in acme-dns collection credentials. Reload the adapter configuration page to see them. Configure _acme-challenge CNAME using the generated acme-dns target and start the adapter again.`,
                     );
                 }
-                this.log.info(
+                this.log.warn(
                     `Collection ${collection.id}: skipping certificate order in this run so DNS delegation can be configured first.`,
                 );
                 restoreDnsOverride();
@@ -1745,8 +1879,9 @@ class AcmeAdapter extends utils.Adapter {
                         );
                     }
 
-                    const restoreHttp01FastFail = (): void => undefined;
-                    const restoreHttp01NetworkPreference = (): void => undefined;
+                    const hasHttp01Targets = this.config.http01Active && hasNonWildcardDomains;
+                    const restoreHttp01FastFail = this.applyHttp01SelfCheckFastFail(hasHttp01Targets);
+                    const restoreHttp01NetworkPreference = this.applyHttp01SelfCheckNetworkPreference(hasHttp01Targets);
 
                     try {
                         cert = (
@@ -1772,9 +1907,6 @@ class AcmeAdapter extends utils.Adapter {
                                             challenge,
                                             keyAuthorization,
                                         );
-                                        this.dnsChallengeCache[this.getDnsChallengeCacheKey(authz, challenge)] =
-                                            challengeData;
-                                        await handler.set(challengeData);
 
                                         const sourceDnsHost = `_acme-challenge.${authz.identifier.value}`;
                                         const challengeDnsHost =
@@ -1804,6 +1936,10 @@ class AcmeAdapter extends utils.Adapter {
                                                 `Missing dnsAuthorization in challenge payload for ${challengeDnsHost}`,
                                             );
                                         }
+
+                                        await handler.set(challengeData);
+                                        this.dnsChallengeCache[this.getDnsChallengeCacheKey(authz, challenge)] =
+                                            challengeData;
 
                                         if (propagationDnsHost !== sourceDnsHost) {
                                             if (!delegationAlreadyVerified) {
@@ -1846,15 +1982,13 @@ class AcmeAdapter extends utils.Adapter {
                                         if (challenge.type === 'dns-01') {
                                             const cacheKey = this.getDnsChallengeCacheKey(authz, challenge);
                                             const cached = this.dnsChallengeCache[cacheKey];
-                                            const removeData =
-                                                cached ||
-                                                (await this.buildDnsChallengePayload(
-                                                    handler,
-                                                    authz,
-                                                    challenge,
-                                                    keyAuthorization,
-                                                ));
-                                            await handler.remove(removeData);
+                                            if (!cached) {
+                                                this.log.debug(
+                                                    `Skipping DNS-01 challenge cleanup for ${authz.identifier.value} because no TXT challenge payload was cached.`,
+                                                );
+                                                return;
+                                            }
+                                            await handler.remove(cached);
                                             delete this.dnsChallengeCache[cacheKey];
                                         } else {
                                             const removeData: any = {
@@ -1918,6 +2052,10 @@ class AcmeAdapter extends utils.Adapter {
                 if (errorMessage.startsWith('Alias delegation not visible:')) {
                     this.log.warn(
                         `Certificate request for ${collection.id} (${domains?.join(', ')}) aborted: ${userFacingErrorMessage}`,
+                    );
+                } else if (errorMessage.startsWith('Alias delegation missing:')) {
+                    this.log.info(
+                        `Certificate request for ${collection.id} (${domains?.join(', ')}) skipped: ${userFacingErrorMessage}`,
                     );
                 } else {
                     this.log.error(
