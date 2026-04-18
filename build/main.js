@@ -918,7 +918,7 @@ class AcmeAdapter extends utils.Adapter {
             await this.persistAutoRegistrationRestartGuard(collectionId);
             this.log.warn(`Collection ${collectionId}: acme-dns account created automatically and credentials were saved in acme-dns collection credentials`);
             if (registration.fullDomain) {
-                this.log.warn(`Collection ${collectionId}: configure CNAME target to ${registration.fullDomain} for DNS-01 delegation`);
+                this.log.warn(`Collection ${collectionId}: configure DNS-01 Alias (fulldomain) to ${registration.fullDomain} for DNS-01 delegation`);
             }
             return credentials;
         }
@@ -1472,11 +1472,16 @@ class AcmeAdapter extends utils.Adapter {
                 this.log.warn(`Collection ${collection.id} contains wildcard domain(s) (${wildcardDomains.join(', ')}), but DNS-01 is disabled. Wildcard certificates require DNS-01. Enable DNS-01 and retry.`);
                 return;
             }
-            if (this.config.dns01Active && this.config.dns01Module === 'acme-dns-01-duckdns') {
+            if (this.config.dns01Active &&
+                (this.config.dns01Module === 'acme-dns-01-duckdns' || this.config.dns01Module === 'acme-dns-01-acmedns')) {
                 const dns01Domains = this.config.http01Active ? wildcardDomains : domains;
                 const uniqueDns01Domains = Array.from(new Set(dns01Domains.map(domain => domain.toLowerCase())));
-                if (uniqueDns01Domains.length > 1) {
+                if (this.config.dns01Module === 'acme-dns-01-duckdns' && uniqueDns01Domains.length > 1) {
                     this.log.warn(`Collection ${collection.id} contains multiple DNS-01 domains (${uniqueDns01Domains.join(', ')}) while provider ${this.config.dns01Module} supports only one TXT record per account. Split this into one domain per collection and retry.`);
+                    return;
+                }
+                if (this.config.dns01Module === 'acme-dns-01-acmedns' && uniqueDns01Domains.length > 2) {
+                    this.log.warn(`Collection ${collection.id} contains too many DNS-01 domains (${uniqueDns01Domains.join(', ')}) while provider ${this.config.dns01Module} supports only two TXT records per account. Limit this to at most two domains per collection and retry.`);
                     return;
                 }
             }
