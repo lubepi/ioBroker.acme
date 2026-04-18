@@ -147,14 +147,19 @@ Available module choices in the adapter UI:
 | -------------------- | -------------- | ------------------------------------- | 
 | **CNAME Delegation** | **deSEC**      | Recommended default for most users    |
 | **CNAME Delegation** | **DuckDNS**    | Single domain per collection only     |
-| **CNAME Delegation** | **acme-dns**   | Single domain per collection only; self-hostable; privilege isolation per collection possible |
+| **CNAME Delegation** | **acme-dns**   | Up to two domains per collection; self-hostable; privilege isolation per collection |
 | **NS Migration**     | **Cloudflare** | Full zone migration                   |
 | **NS Migration**     | **deSEC**      | Full zone migration; focus on privacy |
 
+**Notes:**
+- Since the underlying library (acme-client) processes authorizations in parallel, acknowledge following constraints for `DuckDNS` and `acme-dns`:
+  - `DuckDNS` supports only one TXT record per account. Use one DNS-01 domain per collection; this adapter aborts early with a warning if more are configured.
+  - `acme-dns` supports a rolling update of two TXT records per account. Use at most two DNS-01 domains per collection (for example apex + wildcard); this adapter aborts early with a warning when more than two are configured.
+- For `acme-dns privilege isolation`, use a dedicated account per collection (default behavior for auto mode).
 
 **Important for CNAME Delegation (DNS-01 Alias):**
  - Always requires a `CNAME` record at your primary DNS provider.
- - Point `_acme-challenge.<your-domain>` to your deSEC/DuckDNS alias.
+ - Point `_acme-challenge.<your-domain>` to your deSEC/DuckDNS/acme-dns alias.
  - In the adapter's **DNS-01 Alias** field, enter only the domain (e.g. `xyz.dedyn.io`). **Do not** include `_acme-challenge.`.
  - Most DNS providers automatically append your domain to the record name. Therefore, usually only `_acme-challenge` (for the main domain) or `_acme-challenge.subdomain` needs to be entered in the "Name" or "Host" field. However, some providers expect the full FQDN (Fully Qualified Domain Name), in which case you must enter the complete record name (e.g. `_acme-challenge.example.com`).
 
@@ -180,12 +185,8 @@ Use this if you want isolated or self-hosted DNS-01 handling.
 2. For automatic mode only, run the adapter once so it can create the acme-dns account and store the collection credentials.
 3. In your **primary DNS provider**, add a `CNAME` record:
     - **Name:** `_acme-challenge` (or `_acme-challenge.subdomain` for subdomains)
-    - **Target:** for automatic mode: the `CNAME target` returned by the first adapter run. For manual mode: the `fulldomain` returned by the acme-dns registration API.
+    - **Target:** for automatic mode: the `DNS-01 Alias (fulldomain)` returned by the first adapter run. For manual mode: the `fulldomain` returned by the acme-dns registration API.
 4. Run the adapter (again) so it can use the new delegation and complete the certificate order.
-
-Notes:
-- Use only one domain per collection, as acme-dns (and DuckDNS) provides only one TXT target per account. Since this adapter's underlying library (acme-client) processes authorizations in parallel, combining multiple domains in a single collection may be unreliable. Consequently, this adapter aborts early with a warning when multiple DNS-01 domains are detected. For privilege isolation, use a dedicated acme-dns account per collection.
-- The adapter performs a DNS CNAME precheck and warns if delegation looks missing or mismatched.
 
 #### References
 

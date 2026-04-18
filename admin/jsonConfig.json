@@ -321,7 +321,7 @@
             {
               "type": "text",
               "attr": "fullDomain",
-              "title": "CNAME target (fulldomain)",
+              "title": "DNS-01 Alias (fulldomain)",
               "width": "240px"
             }
           ],
