@@ -2025,13 +2025,15 @@ class AcmeAdapter extends utils.Adapter {
 
                 // Split bundle: first is leaf, everything is chain
                 const certs = cert.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g) || [cert];
-                const leafCert = certs[0];
+                // Ensure each PEM ends with a newline so downstream joins do not corrupt END/BEGIN lines.
+                const normalizedCerts = certs.map(pem => (pem.endsWith('\n') ? pem : `${pem}\n`));
+                const leafCert = normalizedCerts[0];
 
                 const collectionToSet: CertificateCollection | null = {
                     from: this.namespace,
                     key: serverKeyPem,
                     cert: leafCert,
-                    chain: certs,
+                    chain: normalizedCerts,
                     domains,
                     staging: this.config.useStaging,
                     tsExpires: 0,
@@ -2048,7 +2050,7 @@ class AcmeAdapter extends utils.Adapter {
                 }
 
                 this.log.debug(
-                    `Prepared certificate collection ${collection.id} (domains: ${domains.length}, chainParts: ${certs.length})`,
+                    `Prepared certificate collection ${collection.id} (domains: ${domains.length}, chainParts: ${normalizedCerts.length})`,
                 );
                 // Save it
                 await this.certManager?.setCollection(collection.id, collectionToSet);
